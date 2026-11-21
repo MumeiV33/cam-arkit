@@ -2,6 +2,8 @@
 
 Application iPhone native (SwiftUI + ARKit) : toucher un sol ou un mur pour y poser un cube, le sélectionner, le faire pivoter, le supprimer et sauvegarder la carte AR avec ses positions.
 
+Elle comporte aussi l’onglet **Plan** : sur un iPhone ou iPad équipé de LiDAR, RoomPlan détecte une pièce, ses murs, portes, fenêtres et une partie du mobilier, puis génère un plan 2D éditable. Les meubles peuvent être classés fixes ou mobiles. Les plans sont enregistrés localement dans l’app.
+
 ## Développer depuis Windows
 
 VS Code convient pour éditer le Swift et Git. Installe l’extension **Swift** pour la coloration et l’autocomplétion de base. ARKit, le simulateur iOS et l’analyse complète de Swift nécessitent toutefois macOS + Xcode : ils ne fonctionnent pas sur Windows.

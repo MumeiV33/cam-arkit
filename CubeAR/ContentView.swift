@@ -4,6 +4,19 @@ struct ContentView: View {
     @EnvironmentObject private var ar: ARSessionController
 
     var body: some View {
+        TabView {
+            CubeEditorView()
+                .tabItem { Label("Cubes AR", systemImage: "cube.transparent") }
+            FloorPlanEditorView()
+                .tabItem { Label("Plan", systemImage: "square.split.2x2") }
+        }
+    }
+}
+
+private struct CubeEditorView: View {
+    @EnvironmentObject private var ar: ARSessionController
+
+    var body: some View {
         ZStack {
             ARViewContainer().ignoresSafeArea()
 
