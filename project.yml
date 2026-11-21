@@ -1,0 +1,22 @@
+name: CubeAR
+options:
+  bundleIdPrefix: com.example
+settings:
+  base:
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  CubeAR:
+    type: application
+    platform: iOS
+    sources:
+      - path: CubeAR
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.caval.cubear
+        INFOPLIST_FILE: CubeAR/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        GENERATE_INFOPLIST_FILE: NO
+        PRODUCT_NAME: CubeAR

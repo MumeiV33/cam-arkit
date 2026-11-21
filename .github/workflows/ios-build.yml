@@ -1,0 +1,31 @@
+name: Build iOS
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Archive without signing
+        run: >-
+          xcodebuild -project CubeAR.xcodeproj -scheme CubeAR -sdk iphoneos
+          -configuration Debug -archivePath build/CubeAR.xcarchive
+          CODE_SIGNING_ALLOWED=NO archive
+      - name: Package IPA for AltServer
+        run: |
+          mkdir Payload
+          cp -R build/CubeAR.xcarchive/Products/Applications/CubeAR.app Payload/
+          ditto -c -k --sequesterRsrc --keepParent Payload CubeAR-unsigned.ipa
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: CubeAR-unsigned-ipa
+          path: CubeAR-unsigned.ipa
+          retention-days: 7
