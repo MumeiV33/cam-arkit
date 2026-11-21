@@ -21,6 +21,12 @@ struct CameraExperimentsView: View {
             List {
                 Section { Text("Trois essais indépendants utilisant la caméra et ARKit. Les résultats sont expérimentaux et ne remplacent pas un relevé au mètre.") }
                 Section("Prototypes") {
+                    NavigationLink { WallSurveyStartView() } label: {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("4 · Relevé par contact").font(.headline)
+                            Text("Mesurer chaque mur, puis contrôler le retour au premier mur.").font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
                     ForEach(CameraExperiment.allCases) { experiment in
                         Button { selection = experiment } label: {
                             VStack(alignment: .leading, spacing: 5) { Text(experiment.title).font(.headline); Text(experiment.detail).font(.footnote).foregroundStyle(.secondary) }

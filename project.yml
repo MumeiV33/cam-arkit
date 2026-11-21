@@ -21,3 +21,14 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         PRODUCT_NAME: CubeAR
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  CubeARTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: CubeARTests
+    dependencies:
+      - target: CubeAR
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.caval.cubear.tests

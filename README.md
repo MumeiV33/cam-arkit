@@ -76,3 +76,9 @@ Les miroirs, grandes vitres, pièces sombres et couloirs étroits peuvent produi
 ## Essais sans LiDAR
 
 L’onglet **Sans LiDAR** propose trois prototypes séparés : affichage des contours en direct, placement manuel de repères AR, puis création d’un contour de pièce en plaçant au moins trois coins au sol dans l’ordre. La création remplace le plan sélectionné après confirmation ; créez un nouveau plan au préalable pour conserver l’ancien. Les repères sont temporaires et les mesures restent approximatives. Ces prototypes ne détectent pas encore automatiquement les murs, portes ou fenêtres : vérifiez le résultat au mètre.
+
+Le quatrième prototype, **Relevé par contact**, mesure les murs dans l’ordre sans LiDAR. Choisir le sens de parcours vu du dessus, puis démarrer chaque capture avant de poser l’écran contre une partie accessible du mur. Après un délai minimal de 3 s, une fenêtre stable d’environ 1 s avec suivi ARKit normal déclenche une vibration ; après 10 s, une capture insuffisante échoue. À la fin, revenir au premier mur pour contrôler la boucle. Les résultats restent dans cette session et ne sont pas encore enregistrés dans la bibliothèque.
+
+Les paramètres expérimentaux sont dans `SurveySettings` : mouvement maximal 1,5 cm, rotation maximale environ 2°, intersections écartées si quasi parallèles ou à plus de 10 m, fermeture dite cohérente sous 10 cm et 5°. Le décalage caméra-écran est réglable avant le premier mur (1 cm par défaut, sans calibration certifiée). Ces seuils et la direction physique du décalage doivent être vérifiés sur appareil avec et sans coque : un suivi stable ou une boucle cohérente ne garantit pas une mesure exacte.
+
+Sur Mac avec XcodeGen et Xcode, générer le projet avec `xcodegen generate`, puis exécuter les tests `CubeARTests` via Xcode ou `xcodebuild test` sur un simulateur iOS disponible. Les tests géométriques n’ont pas besoin de session AR active.
