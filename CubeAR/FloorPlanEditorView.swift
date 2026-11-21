@@ -27,14 +27,14 @@ private struct PlanCanvas: View {
         ZStack {
             Color(uiColor: .systemBackground)
             if elements.isEmpty { ContentUnavailableView("Aucun plan", systemImage: "viewfinder", description: Text("Appuie sur Scanner et marche lentement autour de la pièce.")) }
-            ForEach($elements) { $element in
-                let value = element.wrappedValue
+            ForEach(elements.indices, id: \.self) { index in
+                let value = elements[index]
                 PlanSymbol(element: value, selected: value.id == selectedID)
                     .frame(width: max(8, CGFloat(value.width) * metrics.scale), height: max(8, CGFloat(value.depth) * metrics.scale))
                     .rotationEffect(.radians(value.rotation))
                     .position(metrics.point(x: value.x, z: value.z))
                     .onTapGesture { selectedID = value.id }
-                    .gesture(drag(for: $element, metrics: metrics))
+                    .gesture(drag(for: $elements[index], metrics: metrics))
             }
         }
     } }
