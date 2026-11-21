@@ -21,7 +21,7 @@ struct Plan3DContainer: UIViewRepresentable {
         let floor = SCNNode(geometry: SCNFloor()); floor.geometry?.firstMaterial?.diffuse.contents = UIColor.secondarySystemBackground; scene.rootNode.addChildNode(floor)
         for item in plan.elements {
             let isWall = item.kind == .wall
-            let height: CGFloat = isWall ? 2.4 : (item.kind == .door || item.kind == .window ? 2.0 : 0.7)
+            let height = CGFloat(item.measuredHeight)
             let box = SCNBox(width: CGFloat(item.width), height: height, length: CGFloat(item.depth), chamferRadius: isWall ? 0 : 0.04)
             let material = SCNMaterial(); material.diffuse.contents = color(for: item.kind); box.materials = [material]
             let node = SCNNode(geometry: box); node.position = SCNVector3(Float(item.x), Float(height / 2), Float(item.z)); node.eulerAngles.y = Float(-item.rotation); scene.rootNode.addChildNode(node)

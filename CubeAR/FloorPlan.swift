@@ -11,6 +11,11 @@ enum PlanElementKind: String, Codable, CaseIterable {
 struct PlanElement: Identifiable, Codable, Equatable {
     var id = UUID(); var kind: PlanElementKind; var title: String
     var x: Double; var z: Double; var width: Double; var depth: Double; var rotation: Double
+    /// Optional to preserve plans saved before height measurements were introduced.
+    var height: Double? = nil
+    var measuredHeight: Double {
+        height ?? (kind == .wall ? 2.4 : (kind == .door || kind == .window ? 2.0 : 0.7))
+    }
 }
 
 struct FloorPlan: Codable { var elements: [PlanElement] = []; var updatedAt = Date() }
@@ -37,7 +42,7 @@ final class FloorPlanStore: ObservableObject {
         values += room.windows.map { makeSurface($0, kind: .window, title: "Fenêtre") }
         values += room.objects.map { object in
             let t = object.transform
-            return PlanElement(kind: .movableFurniture, title: String(describing: object.category).capitalized, x: Double(t.columns.3.x), z: Double(t.columns.3.z), width: max(0.20, Double(object.dimensions.x)), depth: max(0.20, Double(object.dimensions.z)), rotation: yaw(of: t))
+            return PlanElement(kind: .movableFurniture, title: String(describing: object.category).capitalized, x: Double(t.columns.3.x), z: Double(t.columns.3.z), width: max(0.20, Double(object.dimensions.x)), depth: max(0.20, Double(object.dimensions.z)), rotation: yaw(of: t), height: Double(object.dimensions.y))
         }
         plan = FloorPlan(elements: values, updatedAt: .now); save()
         message = "Plan créé : \(room.walls.count) murs, \(room.doors.count) portes et \(room.windows.count) fenêtres."
@@ -64,7 +69,7 @@ final class FloorPlanStore: ObservableObject {
     func delete(_ id: UUID) { plan.elements.removeAll { $0.id == id }; changed() }
     private func makeSurface(_ s: CapturedRoom.Surface, kind: PlanElementKind, title: String) -> PlanElement {
         let t = s.transform
-        return PlanElement(kind: kind, title: title, x: Double(t.columns.3.x), z: Double(t.columns.3.z), width: max(0.08, Double(s.dimensions.x)), depth: kind == .wall ? 0.10 : max(0.10, Double(s.dimensions.z)), rotation: yaw(of: t))
+        return PlanElement(kind: kind, title: title, x: Double(t.columns.3.x), z: Double(t.columns.3.z), width: max(0.08, Double(s.dimensions.x)), depth: kind == .wall ? 0.10 : max(0.10, Double(s.dimensions.z)), rotation: yaw(of: t), height: Double(s.dimensions.y))
     }
     private func yaw(of t: simd_float4x4) -> Double { Double(atan2(t.columns.0.z, t.columns.0.x)) }
     private var fileURL: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("places.json") }

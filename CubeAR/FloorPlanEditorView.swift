@@ -6,15 +6,18 @@ struct FloorPlanEditorView: View {
     @State private var adding: PlanElementKind?
     @State private var showLibrary = false
     @State private var show3D = false
+    @State private var viewScale: CGFloat = 1
+    @State private var viewRotation = 0.0
     var body: some View {
         NavigationStack { VStack(spacing: 0) {
             if let adding { Text("Touchez le plan pour ajouter : \(adding.title)").font(.footnote.weight(.semibold)).padding(8).frame(maxWidth: .infinity).background(.orange.opacity(0.25)) }
-            PlanCanvas(elements: $store.plan.elements, selectedID: $selectedID, adding: $adding) { store.changed() }.clipped().background(Color(uiColor: .secondarySystemBackground))
+            PlanCanvas(elements: $store.plan.elements, selectedID: $selectedID, adding: $adding, viewScale: viewScale, viewRotation: viewRotation) { store.changed() }.clipped().background(Color(uiColor: .secondarySystemBackground))
             if let id = selectedID, let index = store.plan.elements.firstIndex(where: { $0.id == id }) { ElementInspector(element: $store.plan.elements[index]) { store.delete(id); selectedID = nil } onChange: { store.changed() } } else { PlanMeasurements(plan: store.plan).padding(10) }
         }.navigationTitle(store.selectedPlanName()).toolbar {
             ToolbarItem(placement: .topBarLeading) { Button { showLibrary = true } label: { Image(systemName: "folder") } }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu { ForEach(PlanElementKind.allCases, id: \.rawValue) { kind in Button(kind.title) { adding = kind; selectedID = nil } } } label: { Image(systemName: "plus") }
+                Menu { Button("Zoomer") { viewScale = min(3, viewScale + 0.25) }; Button("Dézoomer") { viewScale = max(0.5, viewScale - 0.25) }; Button("Tourner à gauche") { viewRotation -= 15 }; Button("Tourner à droite") { viewRotation += 15 }; Button("Réinitialiser") { viewScale = 1; viewRotation = 0 } } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
                 Button { show3D = true } label: { Image(systemName: "cube") }
                 Button { store.startScan() } label: { Image(systemName: "viewfinder") }
             }
@@ -23,7 +26,7 @@ struct FloorPlanEditorView: View {
 }
 
 private struct PlanCanvas: View {
-    @Binding var elements: [PlanElement]; @Binding var selectedID: UUID?; @Binding var adding: PlanElementKind?; var onChange: () -> Void
+    @Binding var elements: [PlanElement]; @Binding var selectedID: UUID?; @Binding var adding: PlanElementKind?; let viewScale: CGFloat; let viewRotation: Double; var onChange: () -> Void
     var body: some View { GeometryReader { geo in
         let metrics = PlanMetrics(elements: elements, size: geo.size)
         ZStack {
@@ -31,10 +34,11 @@ private struct PlanCanvas: View {
                 guard let kind = adding else { selectedID = nil; return }
                 elements.append(PlanElement(kind: kind, title: kind.title, x: metrics.worldX(point.x), z: metrics.worldZ(point.y), width: kind == .wall ? 1 : 0.8, depth: kind == .wall ? 0.10 : 0.5, rotation: 0)); adding = nil; onChange()
             }
-            if elements.isEmpty { ContentUnavailableView("Aucun plan", systemImage: "viewfinder", description: Text("Scanne une pièce ou ajoute un élément.")) }
-            ForEach(elements.indices, id: \.self) { index in let value = elements[index]
-                PlanSymbol(element: value, selected: value.id == selectedID).frame(width: max(8, CGFloat(value.width) * metrics.scale), height: max(8, CGFloat(value.depth) * metrics.scale)).rotationEffect(.radians(value.rotation)).position(metrics.point(x: value.x, z: value.z)).onTapGesture { selectedID = value.id; adding = nil }.gesture(drag(for: $elements[index], metrics: metrics))
-            }
+            ZStack { if elements.isEmpty { ContentUnavailableView("Aucun plan", systemImage: "viewfinder", description: Text("Scanne une pièce ou ajoute un élément.")) }
+                ForEach(elements.indices, id: \.self) { index in let value = elements[index]
+                    PlanSymbol(element: value, selected: value.id == selectedID).frame(width: max(8, CGFloat(value.width) * metrics.scale), height: max(8, CGFloat(value.depth) * metrics.scale)).rotationEffect(.radians(value.rotation)).position(metrics.point(x: value.x, z: value.z)).onTapGesture { selectedID = value.id; adding = nil }.gesture(drag(for: $elements[index], metrics: metrics))
+                }
+            }.scaleEffect(viewScale).rotationEffect(.degrees(viewRotation))
         }
     } }
     private func drag(for element: Binding<PlanElement>, metrics: PlanMetrics) -> some Gesture { DragGesture().onEnded { value in element.wrappedValue.x += Double(value.translation.width / metrics.scale); element.wrappedValue.z += Double(value.translation.height / metrics.scale); onChange() } }
@@ -44,7 +48,7 @@ private struct PlanSymbol: View { let element: PlanElement; let selected: Bool; 
 
 private struct ElementInspector: View {
     @Binding var element: PlanElement; var onDelete: () -> Void; var onChange: () -> Void
-    var body: some View { VStack(spacing: 8) { HStack { Text(element.title).font(.headline); Spacer(); Button(role: .destructive, action: onDelete) { Image(systemName: "trash") } }; Picker("Type", selection: $element.kind) { ForEach(PlanElementKind.allCases, id: \.rawValue) { Text($0.title).tag($0) } }.pickerStyle(.menu); HStack { Text("L × P : \(element.width, specifier: "%.2f") m × \(element.depth, specifier: "%.2f") m"); Spacer(); Button { element.rotation -= .pi / 12; onChange() } label: { Image(systemName: "rotate.left") }; Button { element.rotation += .pi / 12; onChange() } label: { Image(systemName: "rotate.right") } }.font(.footnote) }.padding().background(.thinMaterial).onChange(of: element.kind) { _, _ in onChange() } }
+    var body: some View { VStack(spacing: 8) { HStack { Text(element.title).font(.headline); Spacer(); Button(role: .destructive, action: onDelete) { Image(systemName: "trash") } }; Picker("Type", selection: $element.kind) { ForEach(PlanElementKind.allCases, id: \.rawValue) { Text($0.title).tag($0) } }.pickerStyle(.menu); HStack { Text("L × P × H : \(element.width, specifier: "%.2f") × \(element.depth, specifier: "%.2f") × \(element.measuredHeight, specifier: "%.2f") m"); Spacer(); Button { element.rotation -= .pi / 12; onChange() } label: { Image(systemName: "rotate.left") }; Button { element.rotation += .pi / 12; onChange() } label: { Image(systemName: "rotate.right") } }.font(.footnote) }.padding().background(.thinMaterial).onChange(of: element.kind) { _, _ in onChange() } }
 }
 
 private struct PlanMeasurements: View { let plan: FloorPlan; var body: some View { let walls = plan.elements.filter { $0.kind == .wall }.reduce(0) { $0 + $1.width }; let doors = plan.elements.filter { $0.kind == .door }.count; let windows = plan.elements.filter { $0.kind == .window }.count; return HStack { Label("Murs : \(walls, specifier: "%.1f") m", systemImage: "ruler"); Spacer(); Text("\(doors) portes · \(windows) fenêtres").foregroundStyle(.secondary) }.font(.footnote) } }
