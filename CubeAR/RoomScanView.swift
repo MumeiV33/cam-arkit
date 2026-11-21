@@ -34,6 +34,6 @@ final class RoomScanViewController: UIViewController, RoomCaptureViewDelegate {
         captureView.captureSession.run(configuration: .init())
     }
     func stopCapture() { captureView.captureSession.stop() }
-    func captureView(shouldPresent roomDataForProcessing data: CapturedRoomData, error: Error?) -> Bool { true }
+    func captureView(shouldPresent roomDataForProcessing: CapturedRoomData, error: Error?) -> Bool { true }
     func captureView(didPresent processedResult: CapturedRoom, error: Error?) { if let error { onFailure?("Scan impossible : \(error.localizedDescription)") } else { onFinished?(processedResult) } }
 }
