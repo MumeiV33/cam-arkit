@@ -72,3 +72,7 @@ La limite habituelle est de trois applications sideloadées actives avec un comp
 - Les dimensions affichées sont `L × P × H` : largeur, profondeur et hauteur, en mètres.
 
 Les miroirs, grandes vitres, pièces sombres et couloirs étroits peuvent produire des murs ou ouvertures inexacts. Toujours vérifier les mesures si le plan doit servir à un usage architectural précis.
+
+## Essais sans LiDAR
+
+L’onglet **Sans LiDAR** propose trois prototypes séparés : affichage des contours en direct, placement manuel de repères AR, puis création d’un contour de pièce en plaçant au moins trois coins au sol dans l’ordre. La création remplace le plan sélectionné après confirmation ; créez un nouveau plan au préalable pour conserver l’ancien. Les repères sont temporaires et les mesures restent approximatives. Ces prototypes ne détectent pas encore automatiquement les murs, portes ou fenêtres : vérifiez le résultat au mètre.

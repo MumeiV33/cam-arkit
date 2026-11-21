@@ -36,6 +36,16 @@ final class FloorPlanStore: ObservableObject {
     var isSupported: Bool { RoomCaptureSession.isSupported }
     func startScan() { guard isSupported else { message = "Cet appareil n’a pas de capteur LiDAR compatible avec RoomPlan."; return }; isScanning = true }
     func stopScan() { scanner?.stopCapture() }
+    func replaceWithGuidedPoints(_ points: [SIMD3<Float>]) {
+        guard points.count >= 3 else { return }
+        let walls = points.indices.map { index -> PlanElement in
+            let a = points[index], b = points[(index + 1) % points.count]
+            let dx = Double(b.x - a.x), dz = Double(b.z - a.z)
+            return PlanElement(kind: .wall, title: "Mur estimé", x: Double((a.x + b.x) / 2), z: Double((a.z + b.z) / 2), width: sqrt(dx * dx + dz * dz), depth: 0.1, rotation: atan2(dz, dx))
+        }
+        plan = FloorPlan(elements: walls, updatedAt: .now); changed()
+        message = "Plan guidé créé : mesures approximatives à vérifier."
+    }
     func replace(with room: CapturedRoom) {
         var values = room.walls.map { makeSurface($0, kind: .wall, title: "Mur") }
         values += room.doors.map { makeSurface($0, kind: .door, title: "Porte") }
