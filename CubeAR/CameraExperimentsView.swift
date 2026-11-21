@@ -125,7 +125,7 @@ final class ExperimentCameraController: UIViewController, ARSessionDelegate {
     }
     func undo() {
         guard let anchor = anchors.popLast() else { return }
-        arView.session.remove(anchor: anchor); arView.scene.rootNode.childNode(withName: anchor.identifier.uuidString, recursively: false)?.removeFromParent()
+        arView.session.remove(anchor: anchor); arView.scene.rootNode.childNode(withName: anchor.identifier.uuidString, recursively: false)?.removeFromParentNode()
         if state?.points.isEmpty == false { state?.points.removeLast() }
     }
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
