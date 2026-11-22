@@ -9,19 +9,23 @@ struct FloorPlanEditorView: View {
     @State private var showCaptureChoice = false
     @State private var showContactCapture = false
     @State private var confirmLidarReplacement = false
-    @State private var viewScale: CGFloat = 1
-    @State private var viewRotation = 0.0
+    @State private var overlays = PlanOverlayOptions()
     var body: some View {
         NavigationStack { VStack(spacing: 0) {
             if let adding { Text("Touchez le plan pour ajouter : \(adding.title)").font(.footnote.weight(.semibold)).padding(8).frame(maxWidth: .infinity).background(.orange.opacity(0.25)) }
-            PlanCanvas(elements: $store.plan.elements, selectedID: $selectedID, adding: $adding, viewScale: viewScale, viewRotation: viewRotation) { store.changed() }.clipped().background(Color(uiColor: .secondarySystemBackground))
-            PlanViewControls(scale: $viewScale, rotation: $viewRotation)
-            if let id = selectedID, let index = store.plan.elements.firstIndex(where: { $0.id == id }) { ElementInspector(element: $store.plan.elements[index]) { store.delete(id); selectedID = nil } onChange: { store.changed() } } else { PlanMeasurements(plan: store.plan).padding(10) }
+            InteractivePlanView(elements: $store.plan.elements, selectedID: $selectedID, adding: $adding, overlays: overlays, planID: store.selectedPlanID) { store.changed() }
+                .clipped().background(Color(uiColor: .secondarySystemBackground))
+            if let id = selectedID, let index = store.plan.elements.firstIndex(where: { $0.id == id }) { ElementInspector(element: $store.plan.elements[index]) { store.delete(id); selectedID = nil } onChange: { store.changed() } } else { VStack(spacing: 4) { PlanMeasurements(plan: store.plan); Text("Glisser : déplacer · pincer / tourner : vue · double toucher : cadrer · appui long : déplacer un élément").font(.caption2).foregroundStyle(.secondary) }.padding(10) }
         }.navigationTitle(store.selectedPlanName()).toolbar {
             ToolbarItem(placement: .topBarLeading) { Button { showLibrary = true } label: { Image(systemName: "folder") } }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu { ForEach(PlanElementKind.allCases, id: \.rawValue) { kind in Button(kind.title) { adding = kind; selectedID = nil } } } label: { Image(systemName: "plus") }
-                Menu { Button("Zoomer") { viewScale = min(3, viewScale + 0.25) }; Button("Dézoomer") { viewScale = max(0.5, viewScale - 0.25) }; Button("Tourner à gauche") { viewRotation -= 15 }; Button("Tourner à droite") { viewRotation += 15 }; Button("Réinitialiser") { viewScale = 1; viewRotation = 0 } } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+                Menu {
+                    Toggle("Numéros des murs", isOn: $overlays.wallNumbers)
+                    Toggle("Longueurs", isOn: $overlays.lengths)
+                    Toggle("Angles aux coins", isOn: $overlays.angles)
+                    Toggle("Murs parallèles", isOn: $overlays.parallelWalls)
+                } label: { Image(systemName: "square.3.layers.3d") }
                 Button { show3D = true } label: { Image(systemName: "cube") }
                 Button { showCaptureChoice = true } label: { Image(systemName: "viewfinder") }
             }

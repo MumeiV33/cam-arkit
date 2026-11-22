@@ -71,6 +71,7 @@ La limite habituelle est de trois applications sideloadées actives avec un comp
 - RoomPlan est une première détection : corriger les éléments mal reconnus avec la sélection, le changement de type, la suppression ou le bouton `+`.
 - Les plans sont rangés dans **Mes lieux** (icône dossier) : un lieu peut contenir plusieurs plans/scans.
 - Le bouton cube ouvre une représentation 3D.
+- Sur le plan 2D, glisser déplace la vue, pincer zoome, tourner deux doigts pivote la vue et un double toucher recentre. Toucher sélectionne un élément ; maintenir puis glisser permet de le déplacer. Le menu des calques permet de superposer numéros, longueurs, angles et indicateurs de murs parallèles. Les angles et parallélismes sont des estimations, pas des corrections géométriques.
 - Les dimensions affichées sont `L × P × H` : largeur, profondeur et hauteur, en mètres.
 
 Les miroirs, grandes vitres, pièces sombres et couloirs étroits peuvent produire des murs ou ouvertures inexacts. Toujours vérifier les mesures si le plan doit servir à un usage architectural précis.
