@@ -18,6 +18,8 @@ import ImageIO
     @Published var relocalizing = false
     @Published var mapStatus = "Carte AR en attente"
     @Published var mapSaving = false
+    @Published var cameraPosition: SIMD2<Double>?
+    @Published var cameraDirection: SIMD2<Double>?
     let direction: SurveyDirection
     let session = ARSession()
     var settings = SurveySettings()
@@ -36,6 +38,7 @@ import ImageIO
     private var startedAt: TimeInterval = 0
     private var timeout: Timer?
     private var lastNormalFrame: TimeInterval = 0
+    private var lastPositionUpdate: TimeInterval = 0
 
     init(direction: SurveyDirection, draft: WallSurveyDraft? = nil, resume: Bool = false) {
         self.direction = direction
@@ -145,7 +148,7 @@ import ImageIO
     }
     private func receive(state: ARCamera.TrackingState, transform: simd_float4x4, timestamp: TimeInterval, mapping: ARFrame.WorldMappingStatus) {
         if case .limited(.relocalizing) = state { sawRelocalizing = true; relocalizing = true }
-        guard case .normal = state else { tracking = "Limité — bougez lentement, améliorez la lumière"; samples.removeAll(); stable = false; return }
+        guard case .normal = state else { tracking = "Limité — bougez lentement, améliorez la lumière"; cameraPosition = nil; cameraDirection = nil; samples.removeAll(); stable = false; return }
         if relocalizing {
             guard sawRelocalizing else { return }
             relocalizing = false; readOnly = false; sessionInterrupted = false
@@ -153,6 +156,12 @@ import ImageIO
         }
         guard !readOnly, !sessionInterrupted else { return }
         tracking = "Normal"; lastNormalFrame = ProcessInfo.processInfo.systemUptime
+        if timestamp - lastPositionUpdate >= 0.2 {
+            cameraPosition = SIMD2(Double(transform.columns.3.x), Double(transform.columns.3.z))
+            let forward = SIMD2<Double>(-Double(transform.columns.2.x), -Double(transform.columns.2.z))
+            cameraDirection = simd_length(forward) > 0.1 ? simd_normalize(forward) : nil
+            lastPositionUpdate = timestamp
+        }
         if !walls.isEmpty && !capturing && !mapSaving && timestamp - lastMapRequest > 8 && (mapping == .mapped || mapping == .extending) {
             lastMapRequest = timestamp; saveWorldMap()
         }
@@ -180,14 +189,19 @@ import ImageIO
             let good = result.distance <= settings.goodClosureDistance && result.angle <= settings.goodClosureAngle && geometry.error == nil && directionMatches
             let uncertain = result.distance <= settings.uncertainClosureDistance && result.angle <= settings.uncertainClosureAngle
             closureAccepted = good
-            let directionWarning = directionMatches ? "" : " · sens du contour différent du sens choisi"
-            closureResult = String(format: "%@ · écart %.0f cm · orientation %.1f°%@%@", good ? "Boucle cohérente" : (uncertain ? "Boucle incertaine" : "Boucle incohérente"), result.distance * 100, result.angle, geometry.error.map { " · " + $0 } ?? "", directionWarning)
+            let wallGood = result.distance <= settings.goodClosureDistance && result.angle <= settings.goodClosureAngle
+            closureResult = String(format: "Mur 1 : %@ · écart %.0f cm · orientation %.1f°. Contour : %@", wallGood ? "cohérent" : (uncertain ? "incertain" : "incohérent"), result.distance * 100, result.angle, geometry.error ?? (directionMatches ? "cohérent" : "sens différent de celui choisi"))
             if good { walls[0].observations.append(observation) }
             status = good ? "Contrôle terminé. Les mesures restent approximatives." : "Vérifiez les murs et recommencez le contrôle."
             persist?()
             saveWorldMap()
             UINotificationFeedbackGenerator().notificationOccurred(good ? .success : .warning)
         } else {
+            if let problem = WallGeometry.nextWallProblem(line, after: walls, settings: settings) {
+                status = problem
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                return
+            }
             walls.append(MeasuredWall(observations: [observation], line: line)); closureAccepted = false; closureResult = nil
             status = "Mur \(walls.count) enregistré. Passez au mur suivant."
             persist?()
@@ -311,7 +325,8 @@ struct WallSurveyScreen: View {
                 if let error = drafts.error { Text(error).foregroundStyle(.red) }
                 if let closure = model.closureResult { Text(closure).foregroundStyle(model.closureAccepted ? .green : .orange) }
                 if let error = model.geometry.error { Text(error).foregroundStyle(.orange) }
-                SurveyPlanView(geometry: model.geometry, walls: model.walls).frame(height: 230).background(Color(uiColor: .secondarySystemBackground)).clipShape(RoundedRectangle(cornerRadius: 12))
+                SurveyPlanView(geometry: model.geometry, walls: model.walls, cameraPosition: model.readOnly || model.relocalizing ? nil : model.cameraPosition, cameraDirection: model.cameraDirection, settings: model.settings).frame(height: 260).background(Color(uiColor: .secondarySystemBackground)).clipShape(RoundedRectangle(cornerRadius: 12))
+                Text("Les numéros identifient les murs. La flèche bleue indique la position et la direction approximatives de la caméra lorsque le suivi est normal.").font(.caption).foregroundStyle(.secondary)
                 if !model.walls.isEmpty && model.geometry.corners.count < 2 {
                     Text("Les points indiquent les positions de mesure. Les longueurs apparaissent quand les intersections sont calculables.").font(.caption).foregroundStyle(.secondary)
                 }
@@ -368,20 +383,48 @@ struct WallSurveyCamera: UIViewRepresentable {
 struct SurveyPlanView: View {
     let geometry: SurveyGeometry
     let walls: [MeasuredWall]
+    let cameraPosition: SIMD2<Double>?
+    let cameraDirection: SIMD2<Double>?
+    let settings: SurveySettings
     var body: some View { GeometryReader { proxy in
         let points = geometry.corners
-        let displayPoints = points.count >= 2 ? points : walls.map { $0.line.point }
+        let displayPoints = points + walls.map { $0.line.point } + (cameraPosition.map { [$0] } ?? [])
         let minX = displayPoints.map(\.x).min() ?? -1, maxX = displayPoints.map(\.x).max() ?? 1
         let minY = displayPoints.map(\.y).min() ?? -1, maxY = displayPoints.map(\.y).max() ?? 1
-        let scale = min((proxy.size.width-30)/CGFloat(max(maxX-minX, 0.5)), (proxy.size.height-30)/CGFloat(max(maxY-minY, 0.5)))
+        let scale = min(max(1, proxy.size.width-64)/CGFloat(max(maxX-minX, 0.5)), max(1, proxy.size.height-64)/CGFloat(max(maxY-minY, 0.5)))
         Canvas { context, _ in
-            func convert(_ p: SIMD2<Double>) -> CGPoint { CGPoint(x: 15 + CGFloat(p.x-minX)*scale, y: 15 + CGFloat(p.y-minY)*scale) }
+            func convert(_ p: SIMD2<Double>) -> CGPoint { CGPoint(x: 32 + CGFloat(p.x-minX)*scale, y: 32 + CGFloat(p.y-minY)*scale) }
             if points.count >= 2 {
                 var path = Path(); path.move(to: convert(points[0])); for p in points.dropFirst() { path.addLine(to: convert(p)) }
                 if !geometry.lengths.isEmpty { path.closeSubpath() }
                 context.stroke(path, with: .color(geometry.error == nil ? .blue : .orange), lineWidth: 3)
             }
-            for p in displayPoints { let q = convert(p); context.fill(Path(ellipseIn: CGRect(x: q.x-4, y: q.y-4, width: 8, height: 8)), with: .color(.red)) }
+            let center = walls.isEmpty ? SIMD2<Double>(0, 0) : walls.map { $0.line.point }.reduce(SIMD2<Double>(0, 0), +) / Double(walls.count)
+            for (i, wall) in walls.enumerated() {
+                let before = i > 0 ? WallGeometry.intersection(walls[i-1].line, wall.line, settings: settings) : (geometry.lengths.isEmpty ? nil : points.last)
+                let after = i+1 < walls.count ? WallGeometry.intersection(wall.line, walls[i+1].line, settings: settings) : (geometry.lengths.isEmpty ? nil : points.last)
+                let middle = before.flatMap { start in after.map { (start + $0) / 2 } } ?? wall.line.point
+                var outward = middle - center
+                if simd_length(outward) < 0.01 { outward = wall.line.normal }
+                outward = simd_normalize(outward)
+                let position = convert(middle)
+                let labelPoint = CGPoint(x: position.x + CGFloat(outward.x)*18, y: position.y + CGFloat(outward.y)*18)
+                context.draw(Text("M\(i+1)").font(.caption.bold()).foregroundColor(.primary), at: labelPoint)
+                if before == nil || after == nil {
+                    let q = convert(wall.line.point)
+                    context.fill(Path(ellipseIn: CGRect(x: q.x-3, y: q.y-3, width: 6, height: 6)), with: .color(.orange))
+                }
+            }
+            for p in points { let q = convert(p); context.fill(Path(ellipseIn: CGRect(x: q.x-3, y: q.y-3, width: 6, height: 6)), with: .color(.red)) }
+            if let position = cameraPosition {
+                let p = convert(position)
+                context.fill(Path(ellipseIn: CGRect(x: p.x-5, y: p.y-5, width: 10, height: 10)), with: .color(.blue))
+                if let direction = cameraDirection {
+                    let end = CGPoint(x: p.x + CGFloat(direction.x)*22, y: p.y + CGFloat(direction.y)*22)
+                    var arrow = Path(); arrow.move(to: p); arrow.addLine(to: end)
+                    context.stroke(arrow, with: .color(.blue), lineWidth: 3)
+                }
+            }
         }
     } }
 }

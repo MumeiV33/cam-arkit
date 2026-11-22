@@ -33,6 +33,12 @@ final class WallGeometryTests: XCTestCase {
         XCTAssertNil(WallGeometry.intersection(a, wall(0,1,0,1).line, settings: settings))
         XCTAssertNil(WallGeometry.intersection(a, wall(0,1,0.01,1).line, settings: settings))
     }
+    func testNextWallRejectsDuplicateAndUnusableIntersection() {
+        let first = wall(0, 0, 0, 1)
+        XCTAssertNotNil(WallGeometry.nextWallProblem(wall(2, 0.02, 0, 1).line, after: [first], settings: settings))
+        XCTAssertNotNil(WallGeometry.nextWallProblem(wall(0, 3, 0, 1).line, after: [first], settings: settings))
+        XCTAssertNil(WallGeometry.nextWallProblem(wall(4, 0, 1, 0).line, after: [first], settings: settings))
+    }
     func testClosureDifferentLocationsAndErrors() {
         let first = wall(0,0,0,1).line
         XCTAssertEqual(WallGeometry.closure(first, wall(3,0,0,-1).line).distance, 0, accuracy: 0.001)

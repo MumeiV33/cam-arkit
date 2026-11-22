@@ -108,4 +108,15 @@ enum WallGeometry {
         let distance2 = abs(simd_dot(first.point-last.point, last.normal))
         return ((distance1 + distance2)/2, acos(dot)*180 / .pi)
     }
+    static func nextWallProblem(_ candidate: WallLine, after walls: [MeasuredWall], settings: SurveySettings) -> String? {
+        guard let previous = walls.last else { return nil }
+        let comparison = closure(previous.line, candidate)
+        if comparison.distance < 0.15 && comparison.angle < 5 {
+            return "Cette mesure ressemble au mur précédent. Aucun mur n’a été ajouté ; visez le mur suivant ou refaites la mesure."
+        }
+        guard intersection(previous.line, candidate, settings: settings) != nil else {
+            return "Coin indéterminé : les deux derniers murs sont presque parallèles ou leur intersection est trop éloignée. Aucun mur n’a été ajouté ; réessayez."
+        }
+        return nil
+    }
 }
