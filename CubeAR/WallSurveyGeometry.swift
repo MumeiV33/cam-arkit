@@ -2,6 +2,7 @@ import Foundation
 import simd
 
 enum SurveyDirection: String, CaseIterable { case clockwise = "Horaire", counterclockwise = "Antihoraire" }
+enum WallCaptureMode: String, CaseIterable { case single = "Une prise", twoPoints = "Deux points espacés" }
 struct SurveySettings {
     // Heuristic thresholds, not calibrated measurement uncertainty.
     var screenOffset: Float = 0.01
@@ -38,6 +39,21 @@ struct SurveyGeometry {
     var error: String?
 }
 enum WallGeometry {
+    static func twoPointWall(_ a: WallLine, _ b: WallLine) -> (line: WallLine?, error: String?) {
+        let delta = b.point - a.point
+        let distance = simd_length(delta)
+        guard distance >= 0.30 else { return (nil, "Points trop proches : espacez les prises d’au moins 30 cm sur le même mur.") }
+        let direction = delta / distance
+        let alignment = abs(simd_dot(a.normal, b.normal))
+        guard alignment >= cos(15 * Double.pi / 180) else { return (nil, "Orientations trop différentes : plaquez l’écran sur la même face du mur et réessayez.") }
+        let maxNormalAlongWall = sin(15 * Double.pi / 180)
+        guard abs(simd_dot(a.normal, direction)) <= maxNormalAlongWall && abs(simd_dot(b.normal, direction)) <= maxNormalAlongWall else {
+            return (nil, "Positions et orientations incohérentes : vérifiez que les deux prises sont sur le même mur, puis réessayez.")
+        }
+        var normal = SIMD2(-direction.y, direction.x)
+        if simd_dot(normal, a.normal) < 0 { normal = -normal }
+        return (WallLine(point: (a.point + b.point) / 2, normal: normal), nil)
+    }
     // AR camera local +Z points toward the screen. Offset is an approximation,
     // not an Apple-supplied camera-to-glass calibration.
     static func line(transform: simd_float4x4, offset: Float) -> WallLine? {

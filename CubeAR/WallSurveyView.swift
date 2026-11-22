@@ -20,7 +20,9 @@ import ImageIO
     @Published var mapSaving = false
     @Published var cameraPosition: SIMD2<Double>?
     @Published var cameraDirection: SIMD2<Double>?
+    @Published var pendingObservation: WallObservation?
     let direction: SurveyDirection
+    let captureMode: WallCaptureMode
     let session = ARSession()
     var settings = SurveySettings()
     let draftID: UUID
@@ -40,8 +42,9 @@ import ImageIO
     private var lastNormalFrame: TimeInterval = 0
     private var lastPositionUpdate: TimeInterval = 0
 
-    init(direction: SurveyDirection, draft: WallSurveyDraft? = nil, resume: Bool = false) {
+    init(direction: SurveyDirection, mode: WallCaptureMode = .single, draft: WallSurveyDraft? = nil, resume: Bool = false) {
         self.direction = direction
+        self.captureMode = draft.flatMap { $0.captureMode }.flatMap(WallCaptureMode.init(rawValue:)) ?? mode
         self.draftID = draft?.id ?? UUID(); self.createdAt = draft?.createdAt ?? Date()
         self.readOnly = draft != nil
         self.savedMapData = draft?.worldMapData
@@ -51,6 +54,7 @@ import ImageIO
         if let draft {
             walls = draft.walls.map { $0.wall() }; offsetCentimeters = draft.offsetCentimeters
             closureAccepted = draft.closureAccepted; closureResult = draft.closureResult
+            pendingObservation = draft.pendingObservation?.observation()
             status = "Brouillon restauré en consultation. Les mesures sont conservées."
         }
         session.delegate = self
@@ -58,7 +62,7 @@ import ImageIO
     func snapshot() -> WallSurveyDraft {
         WallSurveyDraft(id: draftID, createdAt: createdAt, updatedAt: Date(), direction: direction.rawValue,
                         offsetCentimeters: offsetCentimeters, walls: walls.map(SavedSurveyWall.init),
-                        closureAccepted: closureAccepted, closureResult: closureResult, worldMapData: savedMapData, referenceImageData: referenceImageData)
+                        closureAccepted: closureAccepted, closureResult: closureResult, worldMapData: savedMapData, referenceImageData: referenceImageData, captureMode: captureMode.rawValue, pendingObservation: pendingObservation.map(SavedWallObservation.init))
     }
     func start() {
         guard ARWorldTrackingConfiguration.isSupported else { status = "ARKit indisponible sur cet appareil."; return }
@@ -98,7 +102,7 @@ import ImageIO
         Task { @MainActor in self.status = "Reprise : visez lentement les zones déjà observées." }
     }
     func saveWorldMap() {
-        guard !readOnly, !relocalizing, !sessionInterrupted, !mapSaving, !walls.isEmpty else { return }
+        guard !readOnly, !relocalizing, !sessionInterrupted, !mapSaving, !walls.isEmpty || pendingObservation != nil else { return }
         guard let frame = session.currentFrame else { mapStatus = "Caméra non disponible : carte non sauvegardée."; return }
         guard case .normal = frame.camera.trackingState else { mapStatus = "Suivi limité : carte non actualisée."; return }
         guard frame.worldMappingStatus == .mapped || frame.worldMappingStatus == .extending else {
@@ -136,8 +140,25 @@ import ImageIO
         if elapsed >= 10 { finishFailure("Capture échouée : suivi ou stabilité insuffisants. Réessayez.") }
     }
     func cancel() { timeout?.invalidate(); timeout = nil; capturing = false; samples.removeAll(); stable = false }
-    func undo() { guard !readOnly, !capturing, !walls.isEmpty else { return }; walls.removeLast(); closureResult = nil; closureAccepted = false; checkingClosure = false; status = "Dernière mesure retirée."; persist?() }
-    func prepareClosure() { guard walls.count >= 3, !capturing else { return }; checkingClosure = true; closureResult = nil; closureAccepted = false; status = "Retournez au mur 1 pour contrôler la boucle. Cette mesure ne crée pas de nouveau mur." }
+    func undo() { guard !readOnly, !capturing else { return }; if pendingObservation != nil { pendingObservation = nil; status = "Première prise retirée." } else if !walls.isEmpty { walls.removeLast(); status = "Dernier mur retiré." } else { return }; closureResult = nil; closureAccepted = false; checkingClosure = false; persist?() }
+    func finishWallWithFirstPoint() {
+        guard !readOnly, !capturing, !relocalizing, !sessionInterrupted, let first = pendingObservation else { return }
+        guard let line = WallGeometry.line(transform: first.cameraTransform, offset: Float(offsetCentimeters / 100)) else {
+            status = "Première prise invalide : retirez-la et recommencez."
+            return
+        }
+        if let problem = WallGeometry.nextWallProblem(line, after: walls, settings: settings) {
+            status = problem
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            return
+        }
+        walls.append(MeasuredWall(observations: [first], line: line))
+        pendingObservation = nil; closureAccepted = false; closureResult = nil
+        status = "Mur \(walls.count) enregistré avec une seule prise. Le prochain mur utilise de nouveau deux points."
+        persist?(); saveWorldMap()
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+    func prepareClosure() { guard walls.count >= 3, !capturing, pendingObservation == nil else { return }; checkingClosure = true; closureResult = nil; closureAccepted = false; status = "Retournez au mur 1 pour contrôler la boucle. Une seule prise suffit pour ce contrôle." }
     func resumeWalls() { checkingClosure = false; closureAccepted = false; closureResult = nil; status = "Mesurez le mur suivant." }
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let state = frame.camera.trackingState
@@ -162,7 +183,7 @@ import ImageIO
             cameraDirection = simd_length(forward) > 0.1 ? simd_normalize(forward) : nil
             lastPositionUpdate = timestamp
         }
-        if !walls.isEmpty && !capturing && !mapSaving && timestamp - lastMapRequest > 8 && (mapping == .mapped || mapping == .extending) {
+        if (!walls.isEmpty || pendingObservation != nil) && !capturing && !mapSaving && timestamp - lastMapRequest > 8 && (mapping == .mapped || mapping == .extending) {
             lastMapRequest = timestamp; saveWorldMap()
         }
         guard capturing else { return }
@@ -197,12 +218,28 @@ import ImageIO
             saveWorldMap()
             UINotificationFeedbackGenerator().notificationOccurred(good ? .success : .warning)
         } else {
-            if let problem = WallGeometry.nextWallProblem(line, after: walls, settings: settings) {
+            var estimatedLine = line
+            var observations = [observation]
+            if captureMode == .twoPoints {
+                guard let first = pendingObservation else {
+                    pendingObservation = observation
+                    status = "Première prise enregistrée. Déplacez-vous d’au moins 30 cm sur le même mur pour la seconde."
+                    persist?(); saveWorldMap(); UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    return
+                }
+                guard let firstLine = WallGeometry.line(transform: first.cameraTransform, offset: Float(offsetCentimeters / 100)) else {
+                    status = "Première prise invalide : retirez-la et recommencez."; return
+                }
+                let estimate = WallGeometry.twoPointWall(firstLine, line)
+                guard let combined = estimate.line else { status = estimate.error ?? "Deuxième prise invalide."; UINotificationFeedbackGenerator().notificationOccurred(.error); return }
+                estimatedLine = combined; observations = [first, observation]
+            }
+            if let problem = WallGeometry.nextWallProblem(estimatedLine, after: walls, settings: settings) {
                 status = problem
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
                 return
             }
-            walls.append(MeasuredWall(observations: [observation], line: line)); closureAccepted = false; closureResult = nil
+            walls.append(MeasuredWall(observations: observations, line: estimatedLine)); pendingObservation = nil; closureAccepted = false; closureResult = nil
             status = "Mur \(walls.count) enregistré. Passez au mur suivant."
             persist?()
             saveWorldMap()
@@ -217,6 +254,7 @@ struct WallSurveyStartView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var drafts: WallSurveyDraftStore
     @State private var direction: SurveyDirection = .clockwise
+    @State private var mode: WallCaptureMode = .single
     @State private var showSurvey = false
     @State private var selectedDraft: WallSurveyDraft?
     @State private var draftAction: SurveyDraftAction?
@@ -226,6 +264,8 @@ struct WallSurveyStartView: View {
             Section("Nouvelle mesure de pièce") {
                 Text("Faites le tour de la pièce et plaquez l’écran contre chaque mur. Les coins sont estimés par intersection.")
                 Picker("Sens vu du dessus", selection: $direction) { ForEach(SurveyDirection.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
+                Picker("Mesure par mur", selection: $mode) { ForEach(WallCaptureMode.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
+                if mode == .twoPoints { Text("Deux prises sur la même face du mur, espacées d’au moins 30 cm. Le mur est ajouté après la seconde prise si elles sont cohérentes.").font(.footnote).foregroundStyle(.secondary) }
                 Label(ARWorldTrackingConfiguration.isSupported ? "ARKit compatible" : "ARKit indisponible", systemImage: ARWorldTrackingConfiguration.isSupported ? "checkmark.circle" : "xmark.circle")
                 Button("Commencer") { showSurvey = true }.disabled(!ARWorldTrackingConfiguration.isSupported)
             }
@@ -251,7 +291,7 @@ struct WallSurveyStartView: View {
                 Button("Annuler", role: .cancel) { }
             } message: { draft in Text(draft.worldMapData == nil ? "Ce relevé n’a pas de carte AR : seule la consultation est possible." : "Revenez dans la même pièce pour retrouver le repère enregistré.") }
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Fermer") { dismiss() } } }
-            .fullScreenCover(isPresented: $showSurvey) { WallSurveyScreen(direction: direction) }
+            .fullScreenCover(isPresented: $showSurvey) { WallSurveyScreen(direction: direction, mode: mode) }
             .fullScreenCover(item: $draftAction) { action in
                 WallSurveyScreen(direction: SurveyDirection(rawValue: action.draft.direction) ?? .clockwise, draft: action.draft, resume: action.resume)
             }
@@ -274,9 +314,9 @@ struct WallSurveyScreen: View {
     @State private var showing3D = false
     @State private var savedMessage = false
     @State private var confirmFinishWithoutMap = false
-    init(direction: SurveyDirection, draft: WallSurveyDraft? = nil, resume: Bool = false) { _model = StateObject(wrappedValue: WallSurveyModel(direction: direction, draft: draft, resume: resume)) }
+    init(direction: SurveyDirection, mode: WallCaptureMode = .single, draft: WallSurveyDraft? = nil, resume: Bool = false) { _model = StateObject(wrappedValue: WallSurveyModel(direction: direction, mode: mode, draft: draft, resume: resume)) }
     private func saveDraft() {
-        guard !model.walls.isEmpty || model.referenceImageData != nil || drafts.drafts.contains(where: { $0.id == model.draftID }) else { return }
+        guard !model.walls.isEmpty || model.pendingObservation != nil || model.referenceImageData != nil || drafts.drafts.contains(where: { $0.id == model.draftID }) else { return }
         if !drafts.save(model.snapshot()) { model.status = drafts.error ?? "Le brouillon n’a pas pu être sauvegardé." }
     }
     var body: some View {
@@ -291,16 +331,23 @@ struct WallSurveyScreen: View {
                     }
                 }
                 Text("\(model.walls.count) mur(s) · sens \(model.direction.rawValue.lowercased())").font(.headline)
+                Text("Mode : \(model.captureMode.rawValue)").font(.footnote)
                 Text(model.checkingClosure ? "Contrôle : premier mur" : "Prochain mur : \(model.walls.count + 1)")
+                if model.pendingObservation != nil { Text("Mur \(model.walls.count + 1) : première prise sauvegardée. Faites la seconde sur le même mur.").font(.footnote).foregroundStyle(.orange) }
                 Text("Suivi : \(model.tracking) · Stabilité : \(model.stable ? "stable" : "en attente")").font(.footnote)
                 Text(model.status).font(.callout)
                 if model.capturing { Text("\(model.remaining) s maximum — écran contre le mur").font(.headline); Button("Annuler la capture") { model.cancel() } }
                 else if !model.readOnly {
                     if !model.closureAccepted {
-                        Button(model.checkingClosure ? "Contrôler le mur 1" : "Enregistrer un mur") { model.beginCapture() }.buttonStyle(.borderedProminent).disabled(model.relocalizing)
+                        Button(model.checkingClosure ? "Contrôler le mur 1" : (model.captureMode == .twoPoints ? (model.pendingObservation == nil ? "Première prise du mur" : "Deuxième prise du mur") : "Enregistrer un mur")) { model.beginCapture() }.buttonStyle(.borderedProminent).disabled(model.relocalizing)
+                    }
+                    if model.pendingObservation != nil {
+                        Button("Passer la deuxième prise pour ce mur") { model.finishWallWithFirstPoint() }
+                            .disabled(model.relocalizing)
+                        Text("Le mur sera estimé avec une seule prise ; les murs suivants resteront en mode deux points.").font(.caption).foregroundStyle(.secondary)
                     }
                     HStack {
-                        Button("Refaire le dernier mur") { model.undo() }.disabled(model.walls.isEmpty || model.relocalizing)
+                        Button(model.pendingObservation == nil ? "Refaire le dernier mur" : "Retirer la première prise") { model.undo() }.disabled((model.walls.isEmpty && model.pendingObservation == nil) || model.relocalizing)
                         Spacer()
                         if model.checkingClosure { Button("Ajouter un mur") { model.resumeWalls() } }
                         else { Button("Terminer le parcours") {
@@ -308,16 +355,16 @@ struct WallSurveyScreen: View {
                             guard drafts.error == nil else { return }
                             if model.hasWorldMap { model.stop(); dismiss() }
                             else { confirmFinishWithoutMap = true }
-                        }.disabled(model.walls.isEmpty || model.mapSaving) }
+                        }.disabled((model.walls.isEmpty && model.pendingObservation == nil) || model.mapSaving) }
                     }
-                    if !model.checkingClosure && !model.closureAccepted && model.walls.count >= 3 {
+                    if !model.checkingClosure && !model.closureAccepted && model.walls.count >= 3 && model.pendingObservation == nil {
                         Button("Contrôler la boucle (facultatif)") { model.prepareClosure() }
                     }
                 }
                 if !model.readOnly {
                     Text(model.mapStatus).font(.footnote).foregroundStyle(.secondary)
                     Button("Actualiser la carte pour reprendre plus tard") { model.saveWorldMap() }
-                        .disabled(model.walls.isEmpty || model.mapSaving || model.relocalizing)
+                        .disabled((model.walls.isEmpty && model.pendingObservation == nil) || model.mapSaving || model.relocalizing)
                     Button(model.referenceImageData == nil ? "Prendre une photo de repère (facultatif)" : "Remplacer la photo de repère") { model.captureReferenceImage() }
                         .disabled(model.capturing || model.relocalizing)
                     Text("Prenez cette vue téléphone en main, dans une zone reconnaissable. La photo reste sur cet iPhone.").font(.caption).foregroundStyle(.secondary)
@@ -350,7 +397,7 @@ struct WallSurveyScreen: View {
                     }
                     if savedMessage { Text("Plan enregistré dans le lieu sélectionné. Fermez le relevé pour le consulter.").font(.footnote).foregroundStyle(.green) }
                 }
-                Stepper("Décalage caméra-écran estimé : \(model.offsetCentimeters, specifier: "%.1f") cm", value: $model.offsetCentimeters, in: 0...3, step: 0.1).disabled(!model.walls.isEmpty || model.capturing)
+                Stepper("Décalage caméra-écran estimé : \(model.offsetCentimeters, specifier: "%.1f") cm", value: $model.offsetCentimeters, in: 0...3, step: 0.1).disabled(!model.walls.isEmpty || model.pendingObservation != nil || model.capturing)
                 Text("Valeur indicative, coque comprise ; elle n’est pas calibrée automatiquement. Les hauteurs et angles inclinés ne sont pas mesurés.").font(.caption).foregroundStyle(.secondary)
                 ForEach(model.walls.indices, id: \.self) { index in
                     Text("Mur \(index+1) · \(model.walls[index].observations.count) observation(s) · suivi \(model.walls[index].observations.first?.trackingQuality ?? "inconnu")").font(.footnote)

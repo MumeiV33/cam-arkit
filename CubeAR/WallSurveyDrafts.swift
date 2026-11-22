@@ -52,6 +52,8 @@ struct WallSurveyDraft: Codable, Identifiable {
     var worldMapData: Data? = nil
     // Optional, deliberately taken by the user while the screen is visible.
     var referenceImageData: Data? = nil
+    var captureMode: String? = nil
+    var pendingObservation: SavedWallObservation? = nil
 }
 
 @MainActor final class WallSurveyDraftStore: ObservableObject {

@@ -35,4 +35,15 @@ final class WallSurveyDraftTests: XCTestCase {
         XCTAssertEqual(restored.worldMapData, draft.worldMapData)
         XCTAssertEqual(restored.referenceImageData, draft.referenceImageData)
     }
+    func testPendingFirstPointSurvivesDraftRoundTrip() throws {
+        let observation = WallObservation(timestamp: 42, cameraTransform: matrix_identity_float4x4, trackingQuality: "normal", stabilityScore: 0.01)
+        var draft = WallSurveyDraft(id: UUID(), createdAt: Date(), updatedAt: Date(), direction: SurveyDirection.clockwise.rawValue, offsetCentimeters: 1, walls: [], closureAccepted: false, closureResult: nil)
+        draft.captureMode = WallCaptureMode.twoPoints.rawValue
+        draft.pendingObservation = SavedWallObservation(observation)
+        let restored = try JSONDecoder().decode(WallSurveyDraft.self, from: JSONEncoder().encode(draft))
+        XCTAssertEqual(restored.captureMode, WallCaptureMode.twoPoints.rawValue)
+        XCTAssertEqual(restored.pendingObservation?.timestamp, 42)
+        XCTAssertNotNil(restored.pendingObservation?.observation())
+        XCTAssertTrue(restored.walls.isEmpty)
+    }
 }

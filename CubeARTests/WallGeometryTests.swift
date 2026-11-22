@@ -39,6 +39,21 @@ final class WallGeometryTests: XCTestCase {
         XCTAssertNotNil(WallGeometry.nextWallProblem(wall(0, 3, 0, 1).line, after: [first], settings: settings))
         XCTAssertNil(WallGeometry.nextWallProblem(wall(4, 0, 1, 0).line, after: [first], settings: settings))
     }
+    func testTwoPointWallWithReversedNormalAndDifferentOrder() throws {
+        let first = wall(0, 0, 0, 1).line
+        let second = wall(2, 0, 0, -1).line
+        let line = try XCTUnwrap(WallGeometry.twoPointWall(first, second).line)
+        let reversed = try XCTUnwrap(WallGeometry.twoPointWall(second, first).line)
+        XCTAssertEqual(line.point.x, 1, accuracy: 0.001)
+        XCTAssertEqual(abs(simd_dot(line.normal, reversed.normal)), 1, accuracy: 0.001)
+        XCTAssertEqual(WallGeometry.closure(line, first).distance, 0, accuracy: 0.001)
+    }
+    func testTwoPointWallRejectsShortBaselineAndInconsistentPoses() {
+        let first = wall(0, 0, 0, 1).line
+        XCTAssertNil(WallGeometry.twoPointWall(first, wall(0.2, 0, 0, 1).line).line)
+        XCTAssertNil(WallGeometry.twoPointWall(first, wall(2, 0, 1, 0).line).line)
+        XCTAssertNil(WallGeometry.twoPointWall(first, wall(0, 2, 0, 1).line).line)
+    }
     func testClosureDifferentLocationsAndErrors() {
         let first = wall(0,0,0,1).line
         XCTAssertEqual(WallGeometry.closure(first, wall(3,0,0,-1).line).distance, 0, accuracy: 0.001)
