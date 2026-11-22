@@ -2,7 +2,12 @@ name: Build iOS
 
 on:
   push:
-  pull_request:
+
+# A push already builds the branch used by an open pull request.
+# Keep only the most recent build for each branch.
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
