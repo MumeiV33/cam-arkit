@@ -22,6 +22,9 @@ import ImageIO
     @Published var cameraDirection: SIMD2<Double>?
     @Published var pendingObservation: WallObservation?
     @Published var possibleFirstWall = false
+    @Published var validationWallIndex: Int?
+    @Published var validationResult: String?
+    @Published private(set) var resumedSession = false
     private var firstWallCandidate: (WallLine, [WallObservation])?
     let direction: SurveyDirection
     let captureMode: WallCaptureMode
@@ -136,12 +139,19 @@ import ImageIO
             Task { @MainActor in self?.tick() }
         }
     }
+    func beginRelocalizationCheck(wall index: Int) {
+        guard resumedSession, !readOnly, !relocalizing, !sessionInterrupted, !capturing, walls.indices.contains(index) else { return }
+        validationWallIndex = index
+        validationResult = nil
+        beginCapture()
+        status = "Contrôle du mur \(index + 1) : plaquez l’écran contre la même face que lors du relevé."
+    }
     private func tick() {
         let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
         remaining = max(0, Int(ceil(10 - elapsed)))
         if elapsed >= 10 { finishFailure("Capture échouée : suivi ou stabilité insuffisants. Réessayez.") }
     }
-    func cancel() { timeout?.invalidate(); timeout = nil; capturing = false; samples.removeAll(); stable = false }
+    func cancel() { timeout?.invalidate(); timeout = nil; capturing = false; samples.removeAll(); stable = false; validationWallIndex = nil }
     func undo() { guard !readOnly, !capturing else { return }; if pendingObservation != nil { pendingObservation = nil; status = "Première prise retirée." } else if !walls.isEmpty { walls.removeLast(); status = "Dernier mur retiré." } else { return }; closureResult = nil; closureAccepted = false; checkingClosure = false; persist?() }
     func finishWallWithFirstPoint() {
         guard !readOnly, !capturing, !relocalizing, !sessionInterrupted, let first = pendingObservation else { return }
@@ -171,7 +181,8 @@ import ImageIO
         if relocalizing {
             guard sawRelocalizing else { return }
             relocalizing = false; readOnly = false; sessionInterrupted = false
-            status = "Pièce reconnue : vous pouvez reprendre les mesures. Vérifiez la cohérence au mètre."
+            resumedSession = true
+            status = "ARKit indique avoir retrouvé la carte. Contrôlez un mur connu avant de vous fier au positionnement."
         }
         guard !readOnly, !sessionInterrupted else { return }
         tracking = "Normal"; lastNormalFrame = ProcessInfo.processInfo.systemUptime
@@ -197,7 +208,14 @@ import ImageIO
         let representative = samples[samples.count / 2]
         guard let line = WallGeometry.line(transform: representative.1, offset: Float(offsetCentimeters / 100)) else { finishFailure("Téléphone trop incliné : plaquez l’écran verticalement et réessayez."); return }
         let observation = WallObservation(timestamp: representative.0, cameraTransform: representative.1, trackingQuality: "normal", stabilityScore: maxDistance)
+        let validationIndex = validationWallIndex
         cancel()
+        if let index = validationIndex, walls.indices.contains(index) {
+            let comparison = WallGeometry.closure(walls[index].line, line)
+            validationResult = String(format: "Mur %d : écart perpendiculaire ≈ %.0f cm · orientation ≈ %.1f°. Ce contrôle ne mesure pas le décalage le long du mur ni la hauteur.", index + 1, comparison.distance * 100, comparison.angle)
+            status = "Contrôle effectué sans modifier le relevé. Comparez aussi la position du téléphone sur le plan."
+            return
+        }
         if checkingClosure {
             checkFirstWall(line: line, observations: [observation])
         } else {
@@ -347,6 +365,7 @@ struct WallSurveyScreen: View {
     @State private var savedMessage = false
     @State private var confirmFinishWithoutMap = false
     @State private var confirmRemoveDuplicate = false
+    @State private var validationWall = 0
     init(direction: SurveyDirection, mode: WallCaptureMode = .single, draft: WallSurveyDraft? = nil, resume: Bool = false) { _model = StateObject(wrappedValue: WallSurveyModel(direction: direction, mode: mode, draft: draft, resume: resume)) }
     private func saveDraft() {
         guard !model.walls.isEmpty || model.pendingObservation != nil || model.referenceImageData != nil || drafts.drafts.contains(where: { $0.id == model.draftID }) else { return }
@@ -371,6 +390,18 @@ struct WallSurveyScreen: View {
                 }
                 Text(model.checkingClosure ? "Contrôle du mur 1" : "Mur \(model.walls.count + 1) · \(model.captureMode.rawValue)").font(.subheadline.weight(.semibold))
                 Text(model.status).font(.callout).frame(maxWidth: .infinity, alignment: .leading).padding(10).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+                if model.resumedSession && !model.readOnly && !model.walls.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Tester la relocalisation", systemImage: "location.viewfinder").font(.headline)
+                        Text("Choisissez un mur déjà mesuré et refaites une prise sur la même face. Le relevé ne sera pas modifié.").font(.caption)
+                        Picker("Mur à vérifier", selection: $validationWall) {
+                            ForEach(model.walls.indices, id: \.self) { index in Text("Mur \(index + 1)").tag(index) }
+                        }
+                        Button { model.beginRelocalizationCheck(wall: validationWall) } label: { Label("Contrôler ce mur", systemImage: "ruler") }
+                            .buttonStyle(.bordered).disabled(model.capturing || model.relocalizing || !model.walls.indices.contains(validationWall))
+                        if let result = model.validationResult { Text(result).font(.footnote) }
+                    }.padding(10).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+                }
                 if model.capturing {
                     HStack { Label("\(model.remaining) s · écran contre le mur", systemImage: "timer").font(.headline); Spacer(); Button("Annuler") { model.cancel() }.buttonStyle(.bordered) }
                 }

@@ -31,7 +31,10 @@ struct OpeningCaptureScreen: View {
             VStack(spacing: 10) {
                 Text("Visez le mur sélectionné : l’app ne peut pas encore vérifier automatiquement sa correspondance avec le plan.")
                     .font(.footnote).foregroundStyle(.secondary)
-                OpeningCamera(state: state).frame(minHeight: 200).clipShape(RoundedRectangle(cornerRadius: 12))
+                OpeningCamera(state: state).frame(minHeight: 200).overlay {
+                    Image(systemName: "plus.circle").font(.title2.weight(.bold)).foregroundStyle(.yellow)
+                        .shadow(radius: 2).allowsHitTesting(false)
+                }.clipShape(RoundedRectangle(cornerRadius: 12))
                 Text(state.guidance).font(.footnote.weight(.medium)).frame(maxWidth: .infinity, alignment: .leading)
                 Picker("Type", selection: $kind) { ForEach(OpeningChoice.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
                 if let width = state.width, let height = state.height {
@@ -55,9 +58,13 @@ struct OpeningCaptureScreen: View {
                         }.buttonStyle(.borderedProminent).disabled(width <= 0 || width > wall.width)
                     }
                 } else {
-                    Text(state.firstPoint == nil ? "Touchez un coin du cadre sur l’image." : "Restez aussi immobile que possible et touchez le coin diagonal opposé sur le même mur.")
+                    Text(state.firstPoint == nil ? "Visez un coin du cadre avec le réticule, puis placez le point." : "Visez le coin diagonal opposé sur le même mur, puis placez le point.")
                         .font(.footnote)
-                    Button("Effacer les points") { state.reset() }.disabled(state.firstPoint == nil)
+                    HStack {
+                        Button("Effacer les points") { state.reset() }.disabled(state.firstPoint == nil)
+                        Spacer()
+                        Button { state.controller?.placePoint() } label: { Label("Placer le point", systemImage: "scope") }.buttonStyle(.borderedProminent)
+                    }
                 }
                 Text("Placez les deux coins manuellement. Les dimensions sont approximatives : vérifiez-les au mètre. La position sur le plan est réglée manuellement.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -89,7 +96,6 @@ private final class OpeningCameraController: UIViewController, ARSessionDelegate
         scene.frame = view.bounds; scene.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         scene.session.delegateQueue = .main
         scene.session.delegate = self; view.addSubview(scene)
-        scene.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped(_:))))
         let configuration = ARWorldTrackingConfiguration(); configuration.planeDetection = [.vertical]
         scene.session.run(configuration)
     }
@@ -109,12 +115,12 @@ private final class OpeningCameraController: UIViewController, ARSessionDelegate
         guard let query = scene.raycastQuery(from: point, allowing: .existingPlaneInfinite, alignment: .vertical) else { return nil }
         return scene.session.raycast(query).first
     }
-    @objc private func tapped(_ gesture: UITapGestureRecognizer) {
+    func placePoint() {
         guard state?.width == nil, let frame = scene.session.currentFrame, case .normal = frame.camera.trackingState else { state?.guidance = "Attendez un suivi normal avant de placer un point."; return }
-        let screenPoint = gesture.location(in: scene)
+        let screenPoint = CGPoint(x: scene.bounds.midX, y: scene.bounds.midY)
         if first == nil {
             guard let result = hit(screenPoint), let plane = result.anchor as? ARPlaneAnchor else {
-                state?.guidance = "Mur non détecté. Balayez lentement le mur, puis touchez à nouveau le premier coin."
+                state?.guidance = "Mur non détecté. Balayez lentement le mur, puis visez à nouveau le premier coin."
                 return
             }
             let t = result.worldTransform, p = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
@@ -122,7 +128,7 @@ private final class OpeningCameraController: UIViewController, ARSessionDelegate
             let normal = SIMD3<Float>(n.x, 0, n.z)
             guard simd_length(normal) > 0.1 else { state?.guidance = "Orientation du mur indisponible. Réessayez."; return }
             first = p; firstNormal = simd_normalize(normal); state?.firstPoint = p; mark(p)
-            state?.guidance = "Premier coin enregistré. Touchez le coin diagonal opposé."
+            state?.guidance = "Premier coin enregistré. Visez le coin diagonal opposé."
             return
         }
         guard let start = first, let normal = firstNormal,
@@ -155,7 +161,7 @@ private final class OpeningCameraController: UIViewController, ARSessionDelegate
                     var normal = simd_normalize(rawNormal); let forward = simd_normalize(rawForward)
                     if simd_dot(normal, forward) < 0 { normal = -normal }
                     let signedAngle = atan2(forward.x * normal.y - forward.y * normal.x, simd_dot(forward, normal)) * 180 / .pi
-                    if abs(signedAngle) <= 8 { state?.guidance = "Orientation face au mur : environ \(Int(abs(signedAngle)))°. Touchez le premier coin." }
+                    if abs(signedAngle) <= 8 { state?.guidance = "Orientation face au mur : environ \(Int(abs(signedAngle)))°. Visez le premier coin." }
                     else { state?.guidance = "Pivotez lentement vers la \(signedAngle > 0 ? "droite" : "gauche") : écart horizontal ≈ \(Int(abs(signedAngle)))°." }
                 }
             } else { state?.guidance = "Repérez une surface verticale et placez-vous face au mur." }
