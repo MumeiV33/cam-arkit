@@ -1,6 +1,8 @@
 import SwiftUI
 import ARKit
 import SceneKit
+import CoreImage
+import ImageIO
 
 @MainActor final class WallSurveyModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var walls: [MeasuredWall] = []
@@ -13,19 +15,110 @@ import SceneKit
     @Published var closureResult: String?
     @Published var closureAccepted = false
     @Published var offsetCentimeters = 1.0
+    @Published var relocalizing = false
+    @Published var mapStatus = "Carte AR en attente"
+    @Published var mapSaving = false
     let direction: SurveyDirection
     let session = ARSession()
     var settings = SurveySettings()
+    let draftID: UUID
+    let createdAt: Date
+    @Published private(set) var readOnly: Bool
+    private var savedMapData: Data?
+    @Published private(set) var referenceImageData: Data?
+    private var storedDraft: WallSurveyDraft?
+    private var sawRelocalizing = false
+    private var sessionInterrupted = false
+    private var lastMapRequest: TimeInterval = 0
+    var hasWorldMap: Bool { savedMapData != nil }
+    var persist: (() -> Void)?
     private var samples: [(TimeInterval, simd_float4x4)] = []
     private var startedAt: TimeInterval = 0
     private var timeout: Timer?
     private var lastNormalFrame: TimeInterval = 0
 
-    init(direction: SurveyDirection) { self.direction = direction; super.init(); session.delegate = self }
-    func start() { guard ARWorldTrackingConfiguration.isSupported else { status = "ARKit indisponible sur cet appareil."; return }; session.run(ARWorldTrackingConfiguration()) }
+    init(direction: SurveyDirection, draft: WallSurveyDraft? = nil, resume: Bool = false) {
+        self.direction = direction
+        self.draftID = draft?.id ?? UUID(); self.createdAt = draft?.createdAt ?? Date()
+        self.readOnly = draft != nil
+        self.savedMapData = draft?.worldMapData
+        self.referenceImageData = draft?.referenceImageData
+        self.storedDraft = resume ? draft : nil
+        super.init()
+        if let draft {
+            walls = draft.walls.map { $0.wall() }; offsetCentimeters = draft.offsetCentimeters
+            closureAccepted = draft.closureAccepted; closureResult = draft.closureResult
+            status = "Brouillon restauré en consultation. Les mesures sont conservées."
+        }
+        session.delegate = self
+    }
+    func snapshot() -> WallSurveyDraft {
+        WallSurveyDraft(id: draftID, createdAt: createdAt, updatedAt: Date(), direction: direction.rawValue,
+                        offsetCentimeters: offsetCentimeters, walls: walls.map(SavedSurveyWall.init),
+                        closureAccepted: closureAccepted, closureResult: closureResult, worldMapData: savedMapData, referenceImageData: referenceImageData)
+    }
+    func start() {
+        guard ARWorldTrackingConfiguration.isSupported else { status = "ARKit indisponible sur cet appareil."; return }
+        if readOnly && storedDraft == nil { return }
+        let config = ARWorldTrackingConfiguration()
+        if readOnly {
+            guard let data = savedMapData, let map = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) else {
+                status = "Aucune carte AR exploitable pour ce brouillon : consultation uniquement."
+                return
+            }
+            config.initialWorldMap = map; relocalizing = true; sawRelocalizing = false
+            status = "Retournez dans la pièce et visez lentement les zones déjà observées."
+        }
+        session.run(config)
+    }
+    func captureReferenceImage() {
+        guard !readOnly, !relocalizing, !capturing, let frame = session.currentFrame else { return }
+        let image = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.right)
+        let scaled = image.transformed(by: CGAffineTransform(scaleX: min(1, 640 / image.extent.width), y: min(1, 640 / image.extent.width)))
+        guard let cgImage = CIContext().createCGImage(scaled, from: scaled.extent),
+              let data = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.65) else {
+            status = "Impossible d’enregistrer la photo de repère."; return
+        }
+        referenceImageData = data
+        status = "Photo de repère enregistrée localement."
+        persist?()
+    }
     func stop() { cancel(); session.pause() }
+    func sessionShouldAttemptRelocalization(_ session: ARSession) -> Bool { true }
+    func sessionWasInterrupted(_ session: ARSession) {
+        Task { @MainActor in
+            self.sessionInterrupted = true; self.relocalizing = true; self.sawRelocalizing = false
+            self.cancel(); self.status = "Session interrompue. Revenez dans la pièce pour retrouver le repère."
+        }
+    }
+    func sessionInterruptionEnded(_ session: ARSession) {
+        Task { @MainActor in self.status = "Reprise : visez lentement les zones déjà observées." }
+    }
+    func saveWorldMap() {
+        guard !readOnly, !relocalizing, !sessionInterrupted, !mapSaving, !walls.isEmpty else { return }
+        guard let frame = session.currentFrame else { mapStatus = "Caméra non disponible : carte non sauvegardée."; return }
+        guard case .normal = frame.camera.trackingState else { mapStatus = "Suivi limité : carte non actualisée."; return }
+        guard frame.worldMappingStatus == .mapped || frame.worldMappingStatus == .extending else {
+            mapStatus = "Explorez davantage la pièce : carte encore insuffisante pour reprendre."
+            return
+        }
+        mapSaving = true; mapStatus = "Sauvegarde de la carte AR…"
+        session.getCurrentWorldMap { [weak self] map, error in
+            Task { @MainActor in
+                guard let self else { return }
+                self.mapSaving = false
+                guard !self.relocalizing, !self.sessionInterrupted else { self.mapStatus = "Session interrompue : dernière carte conservée."; return }
+                guard let map else { self.mapStatus = "Carte AR non sauvegardée : \(error?.localizedDescription ?? "réessayez")"; return }
+                do {
+                    self.savedMapData = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
+                    self.mapStatus = "Carte AR prête à être sauvegardée."
+                    self.persist?()
+                } catch { self.mapStatus = "Carte AR non sauvegardée : \(error.localizedDescription)" }
+            }
+        }
+    }
     func beginCapture() {
-        guard !capturing else { return }
+        guard !capturing, !readOnly, !relocalizing, !sessionInterrupted else { return }
         samples.removeAll(); stable = false; capturing = true; remaining = 10
         startedAt = ProcessInfo.processInfo.systemUptime
         status = "Retournez le téléphone et plaquez l’écran contre le mur."
@@ -40,18 +133,29 @@ import SceneKit
         if elapsed >= 10 { finishFailure("Capture échouée : suivi ou stabilité insuffisants. Réessayez.") }
     }
     func cancel() { timeout?.invalidate(); timeout = nil; capturing = false; samples.removeAll(); stable = false }
-    func undo() { guard !capturing, !walls.isEmpty else { return }; walls.removeLast(); closureResult = nil; closureAccepted = false; checkingClosure = false; status = "Dernière mesure retirée." }
+    func undo() { guard !readOnly, !capturing, !walls.isEmpty else { return }; walls.removeLast(); closureResult = nil; closureAccepted = false; checkingClosure = false; status = "Dernière mesure retirée."; persist?() }
     func prepareClosure() { guard walls.count >= 3, !capturing else { return }; checkingClosure = true; closureResult = nil; closureAccepted = false; status = "Retournez au mur 1 pour contrôler la boucle. Cette mesure ne crée pas de nouveau mur." }
     func resumeWalls() { checkingClosure = false; closureAccepted = false; closureResult = nil; status = "Mesurez le mur suivant." }
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let state = frame.camera.trackingState
         let transform = frame.camera.transform
         let timestamp = frame.timestamp
-        Task { @MainActor in self.receive(state: state, transform: transform, timestamp: timestamp) }
+        let mapping = frame.worldMappingStatus
+        Task { @MainActor in self.receive(state: state, transform: transform, timestamp: timestamp, mapping: mapping) }
     }
-    private func receive(state: ARCamera.TrackingState, transform: simd_float4x4, timestamp: TimeInterval) {
+    private func receive(state: ARCamera.TrackingState, transform: simd_float4x4, timestamp: TimeInterval, mapping: ARFrame.WorldMappingStatus) {
+        if case .limited(.relocalizing) = state { sawRelocalizing = true; relocalizing = true }
         guard case .normal = state else { tracking = "Limité — bougez lentement, améliorez la lumière"; samples.removeAll(); stable = false; return }
+        if relocalizing {
+            guard sawRelocalizing else { return }
+            relocalizing = false; readOnly = false; sessionInterrupted = false
+            status = "Pièce reconnue : vous pouvez reprendre les mesures. Vérifiez la cohérence au mètre."
+        }
+        guard !readOnly, !sessionInterrupted else { return }
         tracking = "Normal"; lastNormalFrame = ProcessInfo.processInfo.systemUptime
+        if !walls.isEmpty && !capturing && !mapSaving && timestamp - lastMapRequest > 8 && (mapping == .mapped || mapping == .extending) {
+            lastMapRequest = timestamp; saveWorldMap()
+        }
         guard capturing else { return }
         samples.append((timestamp, transform)); samples.removeAll { timestamp - $0.0 > 1.1 }
         guard let first = samples.first, samples.count >= 8, timestamp - first.0 >= 0.9 else { stable = false; return }
@@ -80,10 +184,14 @@ import SceneKit
             closureResult = String(format: "%@ · écart %.0f cm · orientation %.1f°%@%@", good ? "Boucle cohérente" : (uncertain ? "Boucle incertaine" : "Boucle incohérente"), result.distance * 100, result.angle, geometry.error.map { " · " + $0 } ?? "", directionWarning)
             if good { walls[0].observations.append(observation) }
             status = good ? "Contrôle terminé. Les mesures restent approximatives." : "Vérifiez les murs et recommencez le contrôle."
+            persist?()
+            saveWorldMap()
             UINotificationFeedbackGenerator().notificationOccurred(good ? .success : .warning)
         } else {
             walls.append(MeasuredWall(observations: [observation], line: line)); closureAccepted = false; closureResult = nil
             status = "Mur \(walls.count) enregistré. Passez au mur suivant."
+            persist?()
+            saveWorldMap()
             UINotificationFeedbackGenerator().notificationOccurred(.success)
         }
     }
@@ -93,8 +201,12 @@ import SceneKit
 
 struct WallSurveyStartView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var drafts: WallSurveyDraftStore
     @State private var direction: SurveyDirection = .clockwise
     @State private var showSurvey = false
+    @State private var selectedDraft: WallSurveyDraft?
+    @State private var draftAction: SurveyDraftAction?
+    @State private var showDraftChoices = false
     var body: some View {
         Form {
             Section("Nouvelle mesure de pièce") {
@@ -104,44 +216,105 @@ struct WallSurveyStartView: View {
                 Button("Commencer") { showSurvey = true }.disabled(!ARWorldTrackingConfiguration.isSupported)
             }
             Section("Précision") { Text("Prototype expérimental : l’écran peut ne pas être parfaitement plaqué. La dérive ARKit et la coque influencent les mesures ; vérifiez au mètre.") }
+            Section("Relevés sauvegardés") {
+                if drafts.drafts.isEmpty { Text("Aucun relevé enregistré.").foregroundStyle(.secondary) }
+                ForEach(drafts.drafts.sorted { $0.updatedAt > $1.updatedAt }) { draft in
+                    Button { selectedDraft = draft; showDraftChoices = true } label: {
+                        VStack(alignment: .leading) {
+                            Text("\(draft.closureAccepted ? "Relevé contrôlé" : "Brouillon") · \(draft.walls.count) mur(s)")
+                            Text(draft.updatedAt, style: .date).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if let error = drafts.error { Text(error).foregroundStyle(.red) }
+            }
         }.navigationTitle("Relevé par contact")
+            .confirmationDialog("Que faire avec ce relevé ?", isPresented: $showDraftChoices, titleVisibility: .visible, presenting: selectedDraft) { draft in
+                Button("Consulter le brouillon") { draftAction = SurveyDraftAction(draft: draft, resume: false) }
+                if draft.worldMapData != nil {
+                    Button("Reprendre avec ARKit") { draftAction = SurveyDraftAction(draft: draft, resume: true) }
+                }
+                Button("Annuler", role: .cancel) { }
+            } message: { draft in Text(draft.worldMapData == nil ? "Ce relevé n’a pas de carte AR : seule la consultation est possible." : "Revenez dans la même pièce pour retrouver le repère enregistré.") }
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Fermer") { dismiss() } } }
             .fullScreenCover(isPresented: $showSurvey) { WallSurveyScreen(direction: direction) }
+            .fullScreenCover(item: $draftAction) { action in
+                WallSurveyScreen(direction: SurveyDirection(rawValue: action.draft.direction) ?? .clockwise, draft: action.draft, resume: action.resume)
+            }
     }
+}
+
+private struct SurveyDraftAction: Identifiable {
+    let id = UUID()
+    let draft: WallSurveyDraft
+    let resume: Bool
 }
 
 struct WallSurveyScreen: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: FloorPlanStore
+    @EnvironmentObject private var drafts: WallSurveyDraftStore
     @StateObject private var model: WallSurveyModel
     @State private var wallHeight = 2.4
     @State private var planName = "Pièce relevée"
     @State private var showing3D = false
     @State private var savedMessage = false
-    init(direction: SurveyDirection) { _model = StateObject(wrappedValue: WallSurveyModel(direction: direction)) }
+    @State private var confirmFinishWithoutMap = false
+    init(direction: SurveyDirection, draft: WallSurveyDraft? = nil, resume: Bool = false) { _model = StateObject(wrappedValue: WallSurveyModel(direction: direction, draft: draft, resume: resume)) }
+    private func saveDraft() {
+        guard !model.walls.isEmpty || model.referenceImageData != nil || drafts.drafts.contains(where: { $0.id == model.draftID }) else { return }
+        if !drafts.save(model.snapshot()) { model.status = drafts.error ?? "Le brouillon n’a pas pu être sauvegardé." }
+    }
     var body: some View {
         NavigationStack {
             ScrollView { VStack(alignment: .leading, spacing: 12) {
-                WallSurveyCamera(session: model.session).frame(height: 190).clipShape(RoundedRectangle(cornerRadius: 12))
+                if !model.readOnly || model.relocalizing { WallSurveyCamera(session: model.session).frame(height: 190).clipShape(RoundedRectangle(cornerRadius: 12)) }
+                if model.readOnly {
+                    Text(model.relocalizing ? "Revenez dans la pièce et visez les zones déjà observées. Les mesures seront possibles après reconnaissance." : "Consultation du relevé enregistré.").font(.footnote).foregroundStyle(.orange)
+                    if model.relocalizing, let data = model.referenceImageData, let image = UIImage(data: data) {
+                        Text("Vue de repère facultative").font(.caption)
+                        Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 150).clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
                 Text("\(model.walls.count) mur(s) · sens \(model.direction.rawValue.lowercased())").font(.headline)
                 Text(model.checkingClosure ? "Contrôle : premier mur" : "Prochain mur : \(model.walls.count + 1)")
                 Text("Suivi : \(model.tracking) · Stabilité : \(model.stable ? "stable" : "en attente")").font(.footnote)
                 Text(model.status).font(.callout)
                 if model.capturing { Text("\(model.remaining) s maximum — écran contre le mur").font(.headline); Button("Annuler la capture") { model.cancel() } }
-                else {
+                else if !model.readOnly {
                     if !model.closureAccepted {
-                        Button(model.checkingClosure ? "Contrôler le mur 1" : "Enregistrer un mur") { model.beginCapture() }.buttonStyle(.borderedProminent)
+                        Button(model.checkingClosure ? "Contrôler le mur 1" : "Enregistrer un mur") { model.beginCapture() }.buttonStyle(.borderedProminent).disabled(model.relocalizing)
                     }
                     HStack {
-                        Button("Refaire le dernier mur") { model.undo() }.disabled(model.walls.isEmpty)
+                        Button("Refaire le dernier mur") { model.undo() }.disabled(model.walls.isEmpty || model.relocalizing)
                         Spacer()
                         if model.checkingClosure { Button("Ajouter un mur") { model.resumeWalls() } }
-                        else { Button("Terminer le parcours") { model.prepareClosure() }.disabled(model.walls.count < 3) }
+                        else { Button("Terminer le parcours") {
+                            saveDraft()
+                            guard drafts.error == nil else { return }
+                            if model.hasWorldMap { model.stop(); dismiss() }
+                            else { confirmFinishWithoutMap = true }
+                        }.disabled(model.walls.isEmpty || model.mapSaving) }
+                    }
+                    if !model.checkingClosure && !model.closureAccepted && model.walls.count >= 3 {
+                        Button("Contrôler la boucle (facultatif)") { model.prepareClosure() }
                     }
                 }
+                if !model.readOnly {
+                    Text(model.mapStatus).font(.footnote).foregroundStyle(.secondary)
+                    Button("Actualiser la carte pour reprendre plus tard") { model.saveWorldMap() }
+                        .disabled(model.walls.isEmpty || model.mapSaving || model.relocalizing)
+                    Button(model.referenceImageData == nil ? "Prendre une photo de repère (facultatif)" : "Remplacer la photo de repère") { model.captureReferenceImage() }
+                        .disabled(model.capturing || model.relocalizing)
+                    Text("Prenez cette vue téléphone en main, dans une zone reconnaissable. La photo reste sur cet iPhone.").font(.caption).foregroundStyle(.secondary)
+                }
+                if let error = drafts.error { Text(error).foregroundStyle(.red) }
                 if let closure = model.closureResult { Text(closure).foregroundStyle(model.closureAccepted ? .green : .orange) }
                 if let error = model.geometry.error { Text(error).foregroundStyle(.orange) }
-                SurveyPlanView(geometry: model.geometry).frame(height: 230).background(Color(uiColor: .secondarySystemBackground)).clipShape(RoundedRectangle(cornerRadius: 12))
+                SurveyPlanView(geometry: model.geometry, walls: model.walls).frame(height: 230).background(Color(uiColor: .secondarySystemBackground)).clipShape(RoundedRectangle(cornerRadius: 12))
+                if !model.walls.isEmpty && model.geometry.corners.count < 2 {
+                    Text("Les points indiquent les positions de mesure. Les longueurs apparaissent quand les intersections sont calculables.").font(.caption).foregroundStyle(.secondary)
+                }
                 ForEach(Array(model.geometry.lengths.enumerated()), id: \.offset) { index, length in Text("Mur \(index+1) : ≈ \(length, specifier: "%.2f") m · angle avec mur \((index+1)%model.walls.count+1) : ≈ \(model.geometry.angles[index], specifier: "%.0f")°") }
                 if model.geometry.lengths.isEmpty, model.geometry.corners.count >= 2 {
                     let points = model.geometry.corners
@@ -169,9 +342,19 @@ struct WallSurveyScreen: View {
                 }
             }.padding() }
             .navigationTitle("Mesure des murs").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Fermer") { model.stop(); dismiss() } } }
+            .alert("Brouillon sauvegardé sans carte AR", isPresented: $confirmFinishWithoutMap) {
+                Button("Explorer encore", role: .cancel) { }
+                Button("Fermer quand même") { model.stop(); dismiss() }
+            } message: { Text("Les murs sont sauvegardés, mais la reprise avec ARKit ne sera pas disponible sans carte. Bougez lentement dans la pièce puis actualisez la carte.") }
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Fermer") {
+                if !model.readOnly { saveDraft(); guard drafts.error == nil else { return } }
+                model.stop(); dismiss()
+            }.disabled(model.mapSaving) } }
             .sheet(isPresented: $showing3D) { Plan3DView(plan: FloorPlan(elements: WallGeometry.planElements(model.geometry, height: wallHeight))) }
-            .onAppear { model.start() }.onDisappear { model.stop() }
+            .onAppear {
+                model.persist = { saveDraft() }
+                model.start()
+            }.onDisappear { model.stop() }
         }
     }
 }
@@ -184,18 +367,21 @@ struct WallSurveyCamera: UIViewRepresentable {
 
 struct SurveyPlanView: View {
     let geometry: SurveyGeometry
+    let walls: [MeasuredWall]
     var body: some View { GeometryReader { proxy in
         let points = geometry.corners
-        let minX = points.map(\.x).min() ?? -1, maxX = points.map(\.x).max() ?? 1
-        let minY = points.map(\.y).min() ?? -1, maxY = points.map(\.y).max() ?? 1
+        let displayPoints = points.count >= 2 ? points : walls.map { $0.line.point }
+        let minX = displayPoints.map(\.x).min() ?? -1, maxX = displayPoints.map(\.x).max() ?? 1
+        let minY = displayPoints.map(\.y).min() ?? -1, maxY = displayPoints.map(\.y).max() ?? 1
         let scale = min((proxy.size.width-30)/CGFloat(max(maxX-minX, 0.5)), (proxy.size.height-30)/CGFloat(max(maxY-minY, 0.5)))
         Canvas { context, _ in
-            guard points.count >= 2 else { return }
             func convert(_ p: SIMD2<Double>) -> CGPoint { CGPoint(x: 15 + CGFloat(p.x-minX)*scale, y: 15 + CGFloat(p.y-minY)*scale) }
-            var path = Path(); path.move(to: convert(points[0])); for p in points.dropFirst() { path.addLine(to: convert(p)) }
-            if !geometry.lengths.isEmpty { path.closeSubpath() }
-            context.stroke(path, with: .color(geometry.error == nil ? .blue : .orange), lineWidth: 3)
-            for p in points { let q = convert(p); context.fill(Path(ellipseIn: CGRect(x: q.x-4, y: q.y-4, width: 8, height: 8)), with: .color(.red)) }
+            if points.count >= 2 {
+                var path = Path(); path.move(to: convert(points[0])); for p in points.dropFirst() { path.addLine(to: convert(p)) }
+                if !geometry.lengths.isEmpty { path.closeSubpath() }
+                context.stroke(path, with: .color(geometry.error == nil ? .blue : .orange), lineWidth: 3)
+            }
+            for p in displayPoints { let q = convert(p); context.fill(Path(ellipseIn: CGRect(x: q.x-4, y: q.y-4, width: 8, height: 8)), with: .color(.red)) }
         }
     } }
 }
