@@ -60,6 +60,18 @@ final class WallGeometryTests: XCTestCase {
         XCTAssertEqual(WallGeometry.closure(first, wall(3,0.3,0,1).line).distance, 0.3, accuracy: 0.001)
         XCTAssertGreaterThan(WallGeometry.closure(first, wall(0,0,0.2,1).line).angle, 10)
     }
+    func testClosureAcceptsValidGeometryEvenIfChosenDirectionDiffers() throws {
+        let walls = [wall(0,0,0,1), wall(4,0,1,0), wall(4,3,0,1), wall(0,3,1,0)]
+        let clockwise = try XCTUnwrap(WallGeometry.assessClosure(walls: walls, check: walls[0].line, direction: .clockwise, settings: settings))
+        let counterclockwise = try XCTUnwrap(WallGeometry.assessClosure(walls: walls, check: walls[0].line, direction: .counterclockwise, settings: settings))
+        XCTAssertTrue(clockwise.accepted); XCTAssertTrue(counterclockwise.accepted)
+        XCTAssertNotEqual(clockwise.directionWarning, counterclockwise.directionWarning)
+    }
+    func testClosureRejectsInconsistentFirstWallDespiteValidContour() throws {
+        let walls = [wall(0,0,0,1), wall(4,0,1,0), wall(4,3,0,1), wall(0,3,1,0)]
+        let assessment = try XCTUnwrap(WallGeometry.assessClosure(walls: walls, check: wall(0, 0.3, 0, 1).line, direction: .clockwise, settings: settings))
+        XCTAssertFalse(assessment.accepted); XCTAssertNil(assessment.contourError)
+    }
     func testConcaveAndNonOrthogonal() {
         let walls = [wall(0,0,0,1),wall(4,0,1,0),wall(4,1,0,1),wall(2,1,1,0),wall(2,3,0,1),wall(0,3,1,0)]
         let geometry = WallGeometry.geometry(walls, closed: true, settings: settings)

@@ -38,7 +38,26 @@ struct SurveyGeometry {
     var angles: [Double]
     var error: String?
 }
+struct ClosureAssessment {
+    let wallConsistent: Bool
+    let contourError: String?
+    let directionWarning: Bool
+    let distance: Double
+    let angle: Double
+    var accepted: Bool { wallConsistent && contourError == nil }
+}
 enum WallGeometry {
+    static func assessClosure(walls: [MeasuredWall], check: WallLine, direction: SurveyDirection, settings: SurveySettings) -> ClosureAssessment? {
+        guard let first = walls.first, walls.count >= 3 else { return nil }
+        let comparison = closure(first.line, check)
+        let result = geometry(walls, closed: true, settings: settings)
+        let points = result.corners
+        let area = points.indices.reduce(0.0) { total, index in total + cross(points[index], points[(index + 1) % points.count]) }
+        let directionWarning = result.error == nil && points.count >= 3 && ((area > 0) != (direction == .clockwise))
+        return ClosureAssessment(wallConsistent: comparison.distance <= settings.goodClosureDistance && comparison.angle <= settings.goodClosureAngle,
+                                 contourError: result.error, directionWarning: directionWarning,
+                                 distance: comparison.distance, angle: comparison.angle)
+    }
     static func twoPointWall(_ a: WallLine, _ b: WallLine) -> (line: WallLine?, error: String?) {
         let delta = b.point - a.point
         let distance = simd_length(delta)
@@ -95,7 +114,7 @@ enum WallGeometry {
         guard closed, corners.count >= 3 else { return SurveyGeometry(corners: corners, lengths: [], angles: [], error: nil) }
         let n = corners.count
         for i in 0..<n { for j in (i+1)..<n where j != i+1 && !(i == 0 && j == n-1) {
-            if intersects(corners[i], corners[(i+1)%n], corners[j], corners[(j+1)%n]) { return SurveyGeometry(corners: corners, lengths: [], angles: [], error: "Contour croisé ou murs superposés : vérifiez l’ordre des mesures.") }
+            if intersects(corners[i], corners[(i+1)%n], corners[j], corners[(j+1)%n]) { return SurveyGeometry(corners: corners, lengths: [], angles: [], error: "Les murs \((i+1)%n+1) et \((j+1)%n+1) se croisent ou se superposent : vérifiez leurs mesures.") }
         } }
         let area = (0..<n).reduce(0.0) { $0 + cross(corners[$1], corners[($1+1)%n]) }
         guard abs(area) > 0.01 else { return SurveyGeometry(corners: corners, lengths: [], angles: [], error: "Contour dégénéré : les mesures ne délimitent pas une pièce.") }

@@ -205,18 +205,12 @@ import ImageIO
         }
     }
     private func checkFirstWall(line: WallLine, observations: [WallObservation]) {
-        if let firstWall = walls.first {
-            let result = WallGeometry.closure(firstWall.line, line)
-            let geometry = WallGeometry.geometry(walls, closed: true, settings: settings)
-            let points = geometry.corners
-            let signedArea = points.indices.reduce(0.0) { sum, i in sum + WallGeometry.cross(points[i], points[(i + 1) % points.count]) }
-            // In the displayed X/Z plan, positive signed area is clockwise.
-            let directionMatches = points.count >= 3 && ((signedArea > 0) == (direction == .clockwise))
-            let good = result.distance <= settings.goodClosureDistance && result.angle <= settings.goodClosureAngle && geometry.error == nil && directionMatches
+        if let result = WallGeometry.assessClosure(walls: walls, check: line, direction: direction, settings: settings) {
+            let good = result.accepted
             let uncertain = result.distance <= settings.uncertainClosureDistance && result.angle <= settings.uncertainClosureAngle
             closureAccepted = good
-            let wallGood = result.distance <= settings.goodClosureDistance && result.angle <= settings.goodClosureAngle
-            closureResult = String(format: "Mur 1 : %@ · écart %.0f cm · orientation %.1f°. Contour : %@", wallGood ? "cohérent" : (uncertain ? "incertain" : "incohérent"), result.distance * 100, result.angle, geometry.error ?? (directionMatches ? "cohérent" : "sens différent de celui choisi"))
+            let warning = result.directionWarning ? " Sens différent de celui choisi : vérifiez le parcours." : ""
+            closureResult = String(format: "Mur 1 : %@ · écart %.0f cm · orientation %.1f°. Contour : %@%@", result.wallConsistent ? "cohérent" : (uncertain ? "incertain" : "incohérent"), result.distance * 100, result.angle, result.contourError ?? "géométriquement fermé", warning)
             // Keep the control observations even when the closure is uncertain.
             walls[0].observations.append(contentsOf: observations)
             status = good ? "Contrôle terminé. Les mesures restent approximatives." : "Vérifiez les murs et recommencez le contrôle."
@@ -282,6 +276,10 @@ import ImageIO
     }
     private func finishFailure(_ text: String) { cancel(); status = text; UINotificationFeedbackGenerator().notificationOccurred(.error) }
     var geometry: SurveyGeometry { WallGeometry.geometry(walls, closed: closureAccepted, settings: settings) }
+    var pendingLine: WallLine? {
+        guard let observation = pendingObservation else { return nil }
+        return WallGeometry.line(transform: observation.cameraTransform, offset: Float(offsetCentimeters / 100))
+    }
 }
 
 struct WallSurveyStartView: View {
@@ -365,54 +363,56 @@ struct WallSurveyScreen: View {
                         Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 150).clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                 }
-                Text("\(model.walls.count) mur(s) · sens \(model.direction.rawValue.lowercased())").font(.headline)
-                Text("Mode : \(model.captureMode.rawValue)").font(.footnote)
-                Text(model.checkingClosure ? "Contrôle : premier mur" : "Prochain mur : \(model.walls.count + 1)")
-                if model.pendingObservation != nil { Text("Mur \(model.walls.count + 1) : première prise sauvegardée. Faites la seconde sur le même mur.").font(.footnote).foregroundStyle(.orange) }
-                Text("Suivi : \(model.tracking) · Stabilité : \(model.stable ? "stable" : "en attente")").font(.footnote)
-                Text(model.status).font(.callout)
-                if model.capturing { Text("\(model.remaining) s maximum — écran contre le mur").font(.headline); Button("Annuler la capture") { model.cancel() } }
+                HStack {
+                    Label("\(model.walls.count) mur(s)", systemImage: "square.split.2x2").font(.headline)
+                    Spacer()
+                    Label(model.tracking == "Normal" ? "Suivi actif" : "Suivi limité", systemImage: model.tracking == "Normal" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(model.tracking == "Normal" ? .green : .orange)
+                }
+                Text(model.checkingClosure ? "Contrôle du mur 1" : "Mur \(model.walls.count + 1) · \(model.captureMode.rawValue)").font(.subheadline.weight(.semibold))
+                Text(model.status).font(.callout).frame(maxWidth: .infinity, alignment: .leading).padding(10).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+                if model.capturing {
+                    HStack { Label("\(model.remaining) s · écran contre le mur", systemImage: "timer").font(.headline); Spacer(); Button("Annuler") { model.cancel() }.buttonStyle(.bordered) }
+                }
                 else if !model.readOnly {
                     if !model.closureAccepted {
-                        Button(model.checkingClosure ? "Contrôler le mur 1" : (model.captureMode == .twoPoints ? (model.pendingObservation == nil ? "Première prise du mur" : "Deuxième prise du mur") : "Enregistrer un mur")) { model.beginCapture() }.buttonStyle(.borderedProminent).disabled(model.relocalizing)
+                        Button { model.beginCapture() } label: {
+                            Label(model.checkingClosure ? "Mesurer le mur 1" : (model.captureMode == .twoPoints ? (model.pendingObservation == nil ? "Mesurer le premier point" : "Mesurer le deuxième point") : "Mesurer ce mur"), systemImage: model.checkingClosure ? "checkmark.circle" : "viewfinder")
+                                .frame(maxWidth: .infinity)
+                        }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.relocalizing)
                     }
                     if model.pendingObservation != nil {
-                        Button("Passer la deuxième prise pour ce mur") { model.finishWallWithFirstPoint() }
-                            .disabled(model.relocalizing)
-                        Text("Le mur sera estimé avec une seule prise ; les murs suivants resteront en mode deux points.").font(.caption).foregroundStyle(.secondary)
+                        Button { model.finishWallWithFirstPoint() } label: { Label("Utiliser un seul point pour ce mur", systemImage: "forward.end") }
+                            .buttonStyle(.bordered).tint(.orange).disabled(model.relocalizing)
                     }
                     HStack {
-                        Button(model.pendingObservation == nil ? "Refaire le dernier mur" : "Retirer la première prise") { model.undo() }.disabled((model.walls.isEmpty && model.pendingObservation == nil) || model.relocalizing)
+                        if model.checkingClosure {
+                            Button { model.resumeWalls() } label: { Label("Revenir aux murs", systemImage: "arrow.uturn.backward") }.buttonStyle(.bordered)
+                        } else if !model.closureAccepted && model.walls.count >= 3 && model.pendingObservation == nil {
+                            Button { model.prepareClosure() } label: { Label("Vérifier le mur 1", systemImage: "checkmark.circle") }.buttonStyle(.bordered).tint(.green)
+                        }
                         Spacer()
-                        if model.checkingClosure { Button("Ajouter un mur") { model.resumeWalls() } }
-                        else { Button("Terminer le parcours") {
-                            saveDraft()
-                            guard drafts.error == nil else { return }
-                            if model.hasWorldMap { model.stop(); dismiss() }
-                            else { confirmFinishWithoutMap = true }
-                        }.disabled((model.walls.isEmpty && model.pendingObservation == nil) || model.mapSaving) }
+                        Menu {
+                            Button { model.undo() } label: { Label(model.pendingObservation == nil ? "Retirer le dernier mur" : "Retirer le premier point", systemImage: "arrow.uturn.backward") }
+                                .disabled((model.walls.isEmpty && model.pendingObservation == nil) || model.relocalizing)
+                            if model.lastWallMayDuplicateFirst && model.pendingObservation == nil {
+                                Button { confirmRemoveDuplicate = true } label: { Label("Vérifier le possible doublon", systemImage: "exclamationmark.triangle") }
+                            }
+                            Button { model.saveWorldMap() } label: { Label("Actualiser la carte AR", systemImage: "map") }
+                                .disabled((model.walls.isEmpty && model.pendingObservation == nil) || model.mapSaving || model.relocalizing)
+                            Button { model.captureReferenceImage() } label: { Label(model.referenceImageData == nil ? "Photo de repère" : "Remplacer la photo de repère", systemImage: "camera") }.disabled(model.relocalizing)
+                            Button { saveDraft(); guard drafts.error == nil else { return }; if model.hasWorldMap { model.stop(); dismiss() } else { confirmFinishWithoutMap = true } } label: { Label("Enregistrer et fermer", systemImage: "square.and.arrow.down") }
+                                .disabled((model.walls.isEmpty && model.pendingObservation == nil) || model.mapSaving)
+                        } label: { Label("Options", systemImage: "ellipsis.circle") }.buttonStyle(.bordered)
                     }
-                    if !model.checkingClosure && !model.closureAccepted && model.walls.count >= 3 && model.pendingObservation == nil {
-                        Button("Fermer le contour : contrôler le mur 1") { model.prepareClosure() }
-                        Text("Ne rajoutez pas le mur 1 : mesurez-le une nouvelle fois avec ce bouton pour contrôler et fermer le contour.").font(.caption).foregroundStyle(.secondary)
-                    }
-                    if model.lastWallMayDuplicateFirst && model.pendingObservation == nil {
-                        Button("Vérifier le dernier mur : possible doublon du mur 1") { confirmRemoveDuplicate = true }.foregroundStyle(.orange)
-                    }
-                }
-                if !model.readOnly {
-                    Text(model.mapStatus).font(.footnote).foregroundStyle(.secondary)
-                    Button("Actualiser la carte pour reprendre plus tard") { model.saveWorldMap() }
-                        .disabled((model.walls.isEmpty && model.pendingObservation == nil) || model.mapSaving || model.relocalizing)
-                    Button(model.referenceImageData == nil ? "Prendre une photo de repère (facultatif)" : "Remplacer la photo de repère") { model.captureReferenceImage() }
-                        .disabled(model.capturing || model.relocalizing)
-                    Text("Prenez cette vue téléphone en main, dans une zone reconnaissable. La photo reste sur cet iPhone.").font(.caption).foregroundStyle(.secondary)
+                    if model.walls.count >= 3 && !model.closureAccepted { Text("Après le dernier mur, utilisez Vérifier le mur 1. Ne l’ajoutez pas comme nouveau mur.").font(.caption).foregroundStyle(.secondary) }
+                    Text(model.mapStatus).font(.caption).foregroundStyle(.secondary)
                 }
                 if let error = drafts.error { Text(error).foregroundStyle(.red) }
                 if let closure = model.closureResult { Text(closure).foregroundStyle(model.closureAccepted ? .green : .orange) }
                 if let error = model.geometry.error { Text(error).foregroundStyle(.orange) }
-                SurveyPlanView(geometry: model.geometry, walls: model.walls, cameraPosition: model.readOnly || model.relocalizing ? nil : model.cameraPosition, cameraDirection: model.cameraDirection, settings: model.settings).frame(height: 260).background(Color(uiColor: .secondarySystemBackground)).clipShape(RoundedRectangle(cornerRadius: 12))
-                Text("Les numéros identifient les murs. La flèche bleue indique la position et la direction approximatives de la caméra lorsque le suivi est normal.").font(.caption).foregroundStyle(.secondary)
+                SurveyPlanView(geometry: model.geometry, walls: model.walls, pendingLine: model.pendingLine, cameraPosition: model.readOnly || model.relocalizing ? nil : model.cameraPosition, cameraDirection: model.cameraDirection, settings: model.settings).frame(height: 260).background(Color(uiColor: .secondarySystemBackground)).clipShape(RoundedRectangle(cornerRadius: 12))
+                Text("Pointillés : direction estimée, pas une longueur mesurée. La flèche bleue indique approximativement la caméra.").font(.caption).foregroundStyle(.secondary)
                 if !model.walls.isEmpty && model.geometry.corners.count < 2 {
                     Text("Les points indiquent les positions de mesure. Les longueurs apparaissent quand les intersections sont calculables.").font(.caption).foregroundStyle(.secondary)
                 }
@@ -477,12 +477,15 @@ struct WallSurveyCamera: UIViewRepresentable {
 struct SurveyPlanView: View {
     let geometry: SurveyGeometry
     let walls: [MeasuredWall]
+    let pendingLine: WallLine?
     let cameraPosition: SIMD2<Double>?
     let cameraDirection: SIMD2<Double>?
     let settings: SurveySettings
     var body: some View { GeometryReader { proxy in
         let points = geometry.corners
-        let displayPoints = points + walls.map { $0.line.point } + (cameraPosition.map { [$0] } ?? [])
+        let guideLines = walls.map(\.line) + (pendingLine.map { [$0] } ?? [])
+        let guideExtents = guideLines.flatMap { [$0.point - $0.direction * 0.35, $0.point + $0.direction * 0.35] }
+        let displayPoints = points + guideExtents + (cameraPosition.map { [$0] } ?? [])
         let minX = displayPoints.map(\.x).min() ?? -1, maxX = displayPoints.map(\.x).max() ?? 1
         let minY = displayPoints.map(\.y).min() ?? -1, maxY = displayPoints.map(\.y).max() ?? 1
         let scale = min(max(1, proxy.size.width-64)/CGFloat(max(maxX-minX, 0.5)), max(1, proxy.size.height-64)/CGFloat(max(maxY-minY, 0.5)))
@@ -493,7 +496,13 @@ struct SurveyPlanView: View {
                 if !geometry.lengths.isEmpty { path.closeSubpath() }
                 context.stroke(path, with: .color(geometry.error == nil ? .blue : .orange), lineWidth: 3)
             }
-            let center = walls.isEmpty ? SIMD2<Double>(0, 0) : walls.map { $0.line.point }.reduce(SIMD2<Double>(0, 0), +) / Double(walls.count)
+            func drawGuide(_ line: WallLine, color: Color) {
+                var guide = Path(); guide.move(to: convert(line.point - line.direction * 0.35)); guide.addLine(to: convert(line.point + line.direction * 0.35))
+                context.stroke(guide, with: .color(color), style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
+                let q = convert(line.point)
+                context.fill(Path(ellipseIn: CGRect(x: q.x-4, y: q.y-4, width: 8, height: 8)), with: .color(color))
+            }
+            let center = walls.isEmpty ? (pendingLine?.point ?? SIMD2<Double>(0, 0)) : walls.map { $0.line.point }.reduce(SIMD2<Double>(0, 0), +) / Double(walls.count)
             for (i, wall) in walls.enumerated() {
                 let before = i > 0 ? WallGeometry.intersection(walls[i-1].line, wall.line, settings: settings) : (geometry.lengths.isEmpty ? nil : points.last)
                 let after = i+1 < walls.count ? WallGeometry.intersection(wall.line, walls[i+1].line, settings: settings) : (geometry.lengths.isEmpty ? nil : points.last)
@@ -505,9 +514,13 @@ struct SurveyPlanView: View {
                 let labelPoint = CGPoint(x: position.x + CGFloat(outward.x)*18, y: position.y + CGFloat(outward.y)*18)
                 context.draw(Text("M\(i+1)").font(.caption.bold()).foregroundColor(.primary), at: labelPoint)
                 if before == nil || after == nil {
-                    let q = convert(wall.line.point)
-                    context.fill(Path(ellipseIn: CGRect(x: q.x-3, y: q.y-3, width: 6, height: 6)), with: .color(.orange))
+                    drawGuide(wall.line, color: .orange)
                 }
+            }
+            if let pendingLine {
+                drawGuide(pendingLine, color: .orange)
+                let point = convert(pendingLine.point)
+                context.draw(Text("M\(walls.count+1) · 1/2").font(.caption.bold()).foregroundColor(.orange), at: CGPoint(x: point.x, y: point.y-16))
             }
             for p in points { let q = convert(p); context.fill(Path(ellipseIn: CGRect(x: q.x-3, y: q.y-3, width: 6, height: 6)), with: .color(.red)) }
             if let position = cameraPosition {
