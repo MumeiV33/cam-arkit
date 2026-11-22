@@ -10,16 +10,48 @@ struct FloorPlanEditorView: View {
     @State private var showContactCapture = false
     @State private var confirmLidarReplacement = false
     @State private var overlays = PlanOverlayOptions()
+    @State private var editing = false
+    @State private var initialPositions: [UUID: CGPoint] = [:]
+    @State private var moveHistory: [PlanMove] = []
+    @State private var confirmReset = false
+    private func setEditing(_ enabled: Bool) {
+        editing = enabled; adding = nil; moveHistory.removeAll()
+        initialPositions = enabled ? Dictionary(uniqueKeysWithValues: store.plan.elements.map { ($0.id, CGPoint(x: CGFloat($0.x), y: CGFloat($0.z))) }) : [:]
+    }
+    private func move(_ id: UUID, by delta: CGPoint) {
+        guard editing, let index = store.plan.elements.firstIndex(where: { $0.id == id }), delta != .zero else { return }
+        let element = store.plan.elements[index]
+        moveHistory.append(PlanMove(id: id, position: CGPoint(x: CGFloat(element.x), y: CGFloat(element.z))))
+        store.plan.elements[index].x += Double(delta.x); store.plan.elements[index].z += Double(delta.y); store.changed()
+    }
+    private func undoMove() {
+        guard let previous = moveHistory.popLast(), let index = store.plan.elements.firstIndex(where: { $0.id == previous.id }) else { return }
+        store.plan.elements[index].x = Double(previous.position.x); store.plan.elements[index].z = Double(previous.position.y); store.changed()
+    }
+    private func resetMoves() {
+        for index in store.plan.elements.indices {
+            guard let position = initialPositions[store.plan.elements[index].id] else { continue }
+            store.plan.elements[index].x = Double(position.x); store.plan.elements[index].z = Double(position.y)
+        }
+        moveHistory.removeAll(); store.changed()
+    }
     var body: some View {
         NavigationStack { VStack(spacing: 0) {
             if let adding { Text("Touchez le plan pour ajouter : \(adding.title)").font(.footnote.weight(.semibold)).padding(8).frame(maxWidth: .infinity).background(.orange.opacity(0.25)) }
-            InteractivePlanView(elements: $store.plan.elements, selectedID: $selectedID, adding: $adding, overlays: overlays, planID: store.selectedPlanID) { store.changed() }
+            InteractivePlanView(elements: $store.plan.elements, selectedID: $selectedID, adding: $adding, overlays: overlays, planID: store.selectedPlanID, editing: editing, onMoveElement: move) { store.changed() }
                 .clipped().background(Color(uiColor: .secondarySystemBackground))
-            if let id = selectedID, let index = store.plan.elements.firstIndex(where: { $0.id == id }) { ElementInspector(element: $store.plan.elements[index]) { store.delete(id); selectedID = nil } onChange: { store.changed() } } else { VStack(spacing: 4) { PlanMeasurements(plan: store.plan); Text("Glisser : déplacer · pincer / tourner : vue · double toucher : cadrer · appui long : déplacer un élément").font(.caption2).foregroundStyle(.secondary) }.padding(10) }
+            HStack {
+                Toggle("Éditer", isOn: Binding(get: { editing }, set: { setEditing($0) })).toggleStyle(.switch)
+                if editing {
+                    Button { undoMove() } label: { Label("Annuler", systemImage: "arrow.uturn.backward") }.disabled(moveHistory.isEmpty)
+                    Button { confirmReset = true } label: { Label("Réinitialiser", systemImage: "arrow.counterclockwise") }.disabled(moveHistory.isEmpty)
+                }
+            }.font(.footnote).padding(.horizontal).padding(.vertical, 6)
+            if let id = selectedID, let index = store.plan.elements.firstIndex(where: { $0.id == id }) { ElementInspector(element: $store.plan.elements[index], editing: editing) { store.delete(id); selectedID = nil } onChange: { store.changed() } } else { VStack(spacing: 4) { PlanMeasurements(plan: store.plan); Text("Glisser : vue · pincer / tourner : vue · double toucher : cadrer · éditer + appui long : déplacer un élément").font(.caption2).foregroundStyle(.secondary) }.padding(10) }
         }.navigationTitle(store.selectedPlanName()).toolbar {
             ToolbarItem(placement: .topBarLeading) { Button { showLibrary = true } label: { Image(systemName: "folder") } }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Menu { ForEach(PlanElementKind.allCases, id: \.rawValue) { kind in Button(kind.title) { adding = kind; selectedID = nil } } } label: { Image(systemName: "plus") }
+                Menu { ForEach(PlanElementKind.allCases, id: \.rawValue) { kind in Button(kind.title) { adding = kind; selectedID = nil } } } label: { Image(systemName: "plus") }.disabled(!editing)
                 Menu {
                     Toggle("Numéros des murs", isOn: $overlays.wallNumbers)
                     Toggle("Longueurs", isOn: $overlays.lengths)
@@ -39,10 +71,17 @@ struct FloorPlanEditorView: View {
                 Button("Continuer", role: .destructive) { store.startScan() }
                 Button("Annuler", role: .cancel) { }
             } message: { Text("Le nouveau scan LiDAR remplacera le plan sélectionné. Pour conserver l’ancien, créez d’abord un nouveau plan dans le dossier.") }
+            .alert("Réinitialiser les déplacements ?", isPresented: $confirmReset) {
+                Button("Réinitialiser", role: .destructive) { resetMoves() }
+                Button("Annuler", role: .cancel) { }
+            } message: { Text("Les éléments existants retrouveront leur position au moment où vous avez activé Éditer. Les autres modifications ne seront pas annulées.") }
             .sheet(isPresented: $showContactCapture) { NavigationStack { WallSurveyStartView() } }
-            .fullScreenCover(isPresented: $store.isScanning) { RoomScannerSheet() } }
+            .fullScreenCover(isPresented: $store.isScanning) { RoomScannerSheet() }
+            .onChange(of: store.selectedPlanID) { _, _ in selectedID = nil; setEditing(false) } }
     }
 }
+
+private struct PlanMove { let id: UUID; let position: CGPoint }
 
 private struct PlanCanvas: View {
     @Binding var elements: [PlanElement]; @Binding var selectedID: UUID?; @Binding var adding: PlanElementKind?; let viewScale: CGFloat; let viewRotation: Double; var onChange: () -> Void
@@ -79,13 +118,27 @@ private struct PlanViewControls: View {
 }
 
 private struct ElementInspector: View {
-    @Binding var element: PlanElement; var onDelete: () -> Void; var onChange: () -> Void
-    var body: some View { VStack(spacing: 8) { HStack { Text(element.title).font(.headline); Spacer(); Button(role: .destructive, action: onDelete) { Image(systemName: "trash") } }; Picker("Type", selection: $element.kind) { ForEach(PlanElementKind.allCases, id: \.rawValue) { Text($0.title).tag($0) } }.pickerStyle(.menu); HStack(spacing: 14) { Measure(label: "Largeur", value: element.width); Measure(label: "Profondeur", value: element.depth); Measure(label: "Hauteur", value: element.measuredHeight) }; HStack { Button { element.rotation -= .pi / 12; onChange() } label: { Label("Tourner", systemImage: "rotate.left") }; Spacer(); Button { element.rotation += .pi / 12; onChange() } label: { Image(systemName: "rotate.right") } }.font(.footnote) }.padding().background(.thinMaterial).onChange(of: element.kind) { _, _ in onChange() } }
+    @Binding var element: PlanElement; var editing: Bool; var onDelete: () -> Void; var onChange: () -> Void
+    var body: some View { VStack(spacing: 8) { HStack { Text(element.title).font(.headline); Spacer(); Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }.disabled(!editing) }; Picker("Type", selection: $element.kind) { ForEach(PlanElementKind.allCases, id: \.rawValue) { Text($0.title).tag($0) } }.pickerStyle(.menu).disabled(!editing); HStack(spacing: 14) { Measure(label: "Largeur", value: element.width); Measure(label: "Profondeur", value: element.depth); Measure(label: "Hauteur", value: element.measuredHeight) }; HStack { Button { element.rotation -= .pi / 12; onChange() } label: { Label("Tourner", systemImage: "rotate.left") }; Spacer(); Button { element.rotation += .pi / 12; onChange() } label: { Image(systemName: "rotate.right") } }.font(.footnote).disabled(!editing) }.padding().background(.thinMaterial).onChange(of: element.kind) { _, _ in onChange() } }
 }
 
 private struct Measure: View { let label: String; let value: Double; var body: some View { VStack(spacing: 2) { Text(label).font(.caption).foregroundStyle(.secondary); Text("\(value, specifier: "%.2f") m").font(.subheadline.weight(.semibold)).monospacedDigit() }.frame(maxWidth: .infinity) } }
 
-private struct PlanMeasurements: View { let plan: FloorPlan; var body: some View { let walls = plan.elements.filter { $0.kind == .wall }.reduce(0) { $0 + $1.width }; let doors = plan.elements.filter { $0.kind == .door }.count; let windows = plan.elements.filter { $0.kind == .window }.count; return HStack { Label("Murs : \(walls, specifier: "%.1f") m", systemImage: "ruler"); Spacer(); Text("\(doors) portes · \(windows) fenêtres").foregroundStyle(.secondary) }.font(.footnote) } }
+private struct PlanMeasurements: View {
+    let plan: FloorPlan
+    var body: some View {
+        let walls = plan.elements.filter { $0.kind == .wall }
+        let total = walls.reduce(0) { $0 + $1.width }
+        let area = PlanArea.area(walls: walls)
+        return HStack {
+            if area == nil { Text("Murs : \(total, specifier: "%.1f") m") }
+            else { Text("Périmètre ≈ \(total, specifier: "%.1f") m") }
+            Spacer()
+            if let area { Text("Surface ≈ \(area, specifier: "%.1f") m²") }
+            else { Text("Surface : contour non fermé").foregroundStyle(.secondary) }
+        }.font(.footnote)
+    }
+}
 
 private struct PlanLibraryView: View {
     @EnvironmentObject private var store: FloorPlanStore; @Environment(\.dismiss) private var dismiss

@@ -14,6 +14,8 @@ struct InteractivePlanView: UIViewRepresentable {
     @Binding var adding: PlanElementKind?
     var overlays: PlanOverlayOptions
     var planID: UUID?
+    var editing: Bool
+    var onMoveElement: (UUID, CGPoint) -> Void
     var onChange: () -> Void
 
     func makeUIView(context: Context) -> InteractivePlanCanvas {
@@ -25,15 +27,14 @@ struct InteractivePlanView: UIViewRepresentable {
             adding = nil; onChange()
         }
         view.onMove = { id, delta in
-            guard let index = elements.firstIndex(where: { $0.id == id }) else { return }
-            elements[index].x += Double(delta.x); elements[index].z += Double(delta.y); onChange()
+            onMoveElement(id, delta)
         }
         return view
     }
     func updateUIView(_ view: InteractivePlanCanvas, context: Context) {
         let wasEmpty = view.elements.isEmpty
         view.elements = elements; view.selectedID = selectedID; view.adding = adding != nil
-        view.overlays = overlays; view.setPlanID(planID)
+        view.overlays = overlays; view.editing = editing; view.setPlanID(planID)
         if wasEmpty && !elements.isEmpty { view.requestFit() }
         view.setNeedsDisplay()
     }
@@ -43,6 +44,7 @@ final class InteractivePlanCanvas: UIView, UIGestureRecognizerDelegate {
     var elements: [PlanElement] = []
     var selectedID: UUID?
     var adding = false
+    var editing = false
     var overlays = PlanOverlayOptions()
     var onSelect: ((UUID?) -> Void)?
     var onAdd: ((CGPoint) -> Void)?
@@ -139,8 +141,8 @@ final class InteractivePlanCanvas: UIView, UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         (gestureRecognizer is UIPinchGestureRecognizer || gestureRecognizer is UIRotationGestureRecognizer) && (otherGestureRecognizer is UIPinchGestureRecognizer || otherGestureRecognizer is UIRotationGestureRecognizer)
     }
-    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        if gestureRecognizer is UILongPressGestureRecognizer { return !adding && hit(gestureRecognizer.location(in: self)) != nil }
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer is UILongPressGestureRecognizer { return editing && !adding && hit(gestureRecognizer.location(in: self)) != nil }
         return true
     }
     override func draw(_ rect: CGRect) {
