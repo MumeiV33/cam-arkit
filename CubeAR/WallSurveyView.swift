@@ -41,7 +41,8 @@ import SceneKit
     }
     func cancel() { timeout?.invalidate(); timeout = nil; capturing = false; samples.removeAll(); stable = false }
     func undo() { guard !capturing, !walls.isEmpty else { return }; walls.removeLast(); closureResult = nil; closureAccepted = false; checkingClosure = false; status = "Dernière mesure retirée." }
-    func prepareClosure() { guard walls.count >= 3, !capturing else { return }; checkingClosure = true; closureResult = nil; closureAccepted = false; status = "Retournez au premier mur, puis enregistrez-le à nouveau." }
+    func prepareClosure() { guard walls.count >= 3, !capturing else { return }; checkingClosure = true; closureResult = nil; closureAccepted = false; status = "Retournez au mur 1 pour contrôler la boucle. Cette mesure ne crée pas de nouveau mur." }
+    func resumeWalls() { checkingClosure = false; closureAccepted = false; closureResult = nil; status = "Mesurez le mur suivant." }
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let state = frame.camera.trackingState
         let transform = frame.camera.transform
@@ -109,7 +110,12 @@ struct WallSurveyStartView: View {
 
 struct WallSurveyScreen: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: FloorPlanStore
     @StateObject private var model: WallSurveyModel
+    @State private var wallHeight = 2.4
+    @State private var planName = "Pièce relevée"
+    @State private var showing3D = false
+    @State private var savedMessage = false
     init(direction: SurveyDirection) { _model = StateObject(wrappedValue: WallSurveyModel(direction: direction)) }
     var body: some View {
         NavigationStack {
@@ -121,16 +127,38 @@ struct WallSurveyScreen: View {
                 Text(model.status).font(.callout)
                 if model.capturing { Text("\(model.remaining) s maximum — écran contre le mur").font(.headline); Button("Annuler la capture") { model.cancel() } }
                 else {
-                    Button(model.checkingClosure ? "Enregistrer à nouveau le premier mur" : "Enregistrer un mur") { model.beginCapture() }.buttonStyle(.borderedProminent)
-                    HStack { Button("Refaire la dernière mesure") { model.undo() }.disabled(model.walls.isEmpty); Spacer(); Button("Terminer le parcours") { model.prepareClosure() }.disabled(model.walls.count < 3) }
+                    if !model.closureAccepted {
+                        Button(model.checkingClosure ? "Contrôler le mur 1" : "Enregistrer un mur") { model.beginCapture() }.buttonStyle(.borderedProminent)
+                    }
+                    HStack {
+                        Button("Refaire le dernier mur") { model.undo() }.disabled(model.walls.isEmpty)
+                        Spacer()
+                        if model.checkingClosure { Button("Ajouter un mur") { model.resumeWalls() } }
+                        else { Button("Terminer le parcours") { model.prepareClosure() }.disabled(model.walls.count < 3) }
+                    }
                 }
                 if let closure = model.closureResult { Text(closure).foregroundStyle(model.closureAccepted ? .green : .orange) }
                 if let error = model.geometry.error { Text(error).foregroundStyle(.orange) }
                 SurveyPlanView(geometry: model.geometry).frame(height: 230).background(Color(uiColor: .secondarySystemBackground)).clipShape(RoundedRectangle(cornerRadius: 12))
-                ForEach(Array(model.geometry.lengths.enumerated()), id: \.offset) { index, length in Text("Segment \(index+1) : ≈ \(length, specifier: "%.2f") m · angle au coin : ≈ \(model.geometry.angles[index], specifier: "%.0f")°") }
+                ForEach(Array(model.geometry.lengths.enumerated()), id: \.offset) { index, length in Text("Mur \(index+1) : ≈ \(length, specifier: "%.2f") m · angle avec mur \((index+1)%model.walls.count+1) : ≈ \(model.geometry.angles[index], specifier: "%.0f")°") }
                 if model.geometry.lengths.isEmpty, model.geometry.corners.count >= 2 {
                     let points = model.geometry.corners
                     Text("Dernier segment estimé : ≈ \(simd_distance(points[points.count-2], points[points.count-1]), specifier: "%.2f") m")
+                }
+                if model.closureAccepted {
+                    Divider()
+                    Text("Construire la pièce").font(.headline)
+                    Text("Les longueurs et angles proviennent du relevé. La hauteur n’est pas mesurée : renseignez une valeur pour la vue 3D.").font(.footnote)
+                    Stepper("Hauteur supposée : \(wallHeight, specifier: "%.2f") m", value: $wallHeight, in: 1.5...6, step: 0.1)
+                    TextField("Nom du nouveau plan", text: $planName).textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button("Voir la pièce en 3D") { showing3D = true }.buttonStyle(.bordered)
+                        Button("Enregistrer le plan") {
+                            store.saveSurveyPlan(named: planName.trimmingCharacters(in: .whitespacesAndNewlines), elements: WallGeometry.planElements(model.geometry, height: wallHeight))
+                            savedMessage = true
+                        }.buttonStyle(.borderedProminent)
+                    }
+                    if savedMessage { Text("Plan enregistré dans le lieu sélectionné. Retrouvez-le dans LiDAR / Plans.").font(.footnote).foregroundStyle(.green) }
                 }
                 Stepper("Décalage caméra-écran estimé : \(model.offsetCentimeters, specifier: "%.1f") cm", value: $model.offsetCentimeters, in: 0...3, step: 0.1).disabled(!model.walls.isEmpty || model.capturing)
                 Text("Valeur indicative, coque comprise ; elle n’est pas calibrée automatiquement. Les hauteurs et angles inclinés ne sont pas mesurés.").font(.caption).foregroundStyle(.secondary)
@@ -140,6 +168,7 @@ struct WallSurveyScreen: View {
             }.padding() }
             .navigationTitle("Mesure des murs").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Fermer") { model.stop(); dismiss() } } }
+            .sheet(isPresented: $showing3D) { Plan3DView(plan: FloorPlan(elements: WallGeometry.planElements(model.geometry, height: wallHeight))) }
             .onAppear { model.start() }.onDisappear { model.stop() }
         }
     }

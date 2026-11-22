@@ -83,13 +83,24 @@ enum WallGeometry {
         } }
         let area = (0..<n).reduce(0.0) { $0 + cross(corners[$1], corners[($1+1)%n]) }
         guard abs(area) > 0.01 else { return SurveyGeometry(corners: corners, lengths: [], angles: [], error: "Contour dégénéré : les mesures ne délimitent pas une pièce.") }
-        let lengths = (0..<n).map { simd_distance(corners[$0], corners[($0+1)%n]) }
+        // corners[i] joins wall i to wall i+1; wall i runs from the
+        // preceding intersection to corners[i].
+        let lengths = (0..<n).map { simd_distance(corners[($0+n-1)%n], corners[$0]) }
         let angles = (0..<n).map { i -> Double in
             let incoming = corners[i] - corners[(i+n-1)%n], outgoing = corners[(i+1)%n] - corners[i]
             let turn = atan2(cross(incoming,outgoing), simd_dot(incoming,outgoing))
             return 180 - turn * (area > 0 ? 1 : -1) * 180 / .pi
         }
         return SurveyGeometry(corners: corners, lengths: lengths, angles: angles, error: nil)
+    }
+    static func planElements(_ geometry: SurveyGeometry, height: Double) -> [PlanElement] {
+        let corners = geometry.corners
+        guard geometry.error == nil, corners.count >= 3, geometry.lengths.count == corners.count else { return [] }
+        return corners.indices.map { i in
+            let start = corners[(i + corners.count - 1) % corners.count], end = corners[i]
+            let delta = end - start
+            return PlanElement(kind: .wall, title: "Mur \(i + 1) estimé", x: (start.x + end.x) / 2, z: (start.y + end.y) / 2, width: simd_length(delta), depth: 0.10, rotation: atan2(delta.y, delta.x), height: height)
+        }
     }
     static func closure(_ first: WallLine, _ last: WallLine) -> (distance: Double, angle: Double) {
         let dot = max(-1.0, min(1.0, abs(simd_dot(first.normal,last.normal))))

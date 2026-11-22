@@ -16,6 +16,18 @@ final class WallGeometryTests: XCTestCase {
             result.angles.forEach { XCTAssertEqual($0, 90, accuracy: 0.001) }
         }
     }
+    func testWallNumbersMatchMeasuredLinesAndPlan() {
+        let walls = [wall(0,0,0,1), wall(4,0,1,0), wall(4,3,0,1), wall(0,3,1,0)]
+        let result = WallGeometry.geometry(walls, closed: true, settings: settings)
+        XCTAssertEqual(result.lengths[0], 4, accuracy: 0.001)
+        XCTAssertEqual(result.lengths[1], 3, accuracy: 0.001)
+        let elements = WallGeometry.planElements(result, height: 2.5)
+        XCTAssertEqual(elements.count, 4)
+        XCTAssertEqual(elements[0].width, 4, accuracy: 0.001)
+        XCTAssertEqual(elements[0].z, 0, accuracy: 0.001)
+        XCTAssertEqual(elements[1].x, 4, accuracy: 0.001)
+        XCTAssertEqual(elements[0].height ?? 0, 2.5, accuracy: 0.001)
+    }
     func testParallelAndNearlyParallel() {
         let a = wall(0,0,0,1).line
         XCTAssertNil(WallGeometry.intersection(a, wall(0,1,0,1).line, settings: settings))

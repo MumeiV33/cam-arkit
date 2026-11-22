@@ -68,6 +68,13 @@ final class FloorPlanStore: ObservableObject {
         let item = SavedPlan(name: name.isEmpty ? "Nouveau plan" : name)
         places[placeIndex].plans.append(item); selectedPlanID = item.id; plan = item.plan; save()
     }
+    func saveSurveyPlan(named name: String, elements: [PlanElement]) {
+        guard !elements.isEmpty else { return }
+        createPlan(named: name)
+        plan = FloorPlan(elements: elements, updatedAt: .now)
+        changed()
+        message = "Pièce issue du relevé enregistrée. Mesures approximatives à vérifier."
+    }
     func select(placeID: UUID, planID: UUID) {
         persistCurrentPlan()
         selectedPlaceID = placeID; selectedPlanID = planID

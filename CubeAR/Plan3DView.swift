@@ -26,7 +26,12 @@ struct Plan3DContainer: UIViewRepresentable {
             let material = SCNMaterial(); material.diffuse.contents = color(for: item.kind); box.materials = [material]
             let node = SCNNode(geometry: box); node.position = SCNVector3(Float(item.x), Float(height / 2), Float(item.z)); node.eulerAngles.y = Float(-item.rotation); scene.rootNode.addChildNode(node)
         }
-        let camera = SCNNode(); camera.camera = SCNCamera(); camera.position = SCNVector3(0, 6, 7); let look = SCNLookAtConstraint(target: scene.rootNode); look.isGimbalLockEnabled = true; camera.constraints = [look]; scene.rootNode.addChildNode(camera)
+        let xs = plan.elements.map(\.x), zs = plan.elements.map(\.z)
+        let centerX = ((xs.min() ?? 0) + (xs.max() ?? 0)) / 2
+        let centerZ = ((zs.min() ?? 0) + (zs.max() ?? 0)) / 2
+        let span = max(4.0, (xs.max() ?? 0) - (xs.min() ?? 0), (zs.max() ?? 0) - (zs.min() ?? 0))
+        let target = SCNNode(); target.position = SCNVector3(Float(centerX), 0.8, Float(centerZ)); scene.rootNode.addChildNode(target)
+        let camera = SCNNode(); camera.camera = SCNCamera(); camera.position = SCNVector3(Float(centerX), Float(span * 1.2), Float(centerZ + span * 1.3)); let look = SCNLookAtConstraint(target: target); look.isGimbalLockEnabled = true; camera.constraints = [look]; scene.rootNode.addChildNode(camera)
         return scene
     }
     private func color(for kind: PlanElementKind) -> UIColor { switch kind { case .wall: .darkGray; case .door: .systemOrange; case .window: .systemCyan; case .fixedFurniture: .gray; case .movableFurniture: .systemTeal } }
