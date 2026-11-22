@@ -21,6 +21,8 @@ import ImageIO
     @Published var cameraPosition: SIMD2<Double>?
     @Published var cameraDirection: SIMD2<Double>?
     @Published var pendingObservation: WallObservation?
+    @Published var possibleFirstWall = false
+    private var firstWallCandidate: (WallLine, [WallObservation])?
     let direction: SurveyDirection
     let captureMode: WallCaptureMode
     let session = ARSession()
@@ -152,11 +154,7 @@ import ImageIO
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             return
         }
-        walls.append(MeasuredWall(observations: [first], line: line))
-        pendingObservation = nil; closureAccepted = false; closureResult = nil
-        status = "Mur \(walls.count) enregistré avec une seule prise. Le prochain mur utilise de nouveau deux points."
-        persist?(); saveWorldMap()
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        submitWall(line: line, observations: [first])
     }
     func prepareClosure() { guard walls.count >= 3, !capturing, pendingObservation == nil else { return }; checkingClosure = true; closureResult = nil; closureAccepted = false; status = "Retournez au mur 1 pour contrôler la boucle. Une seule prise suffit pour ce contrôle." }
     func resumeWalls() { checkingClosure = false; closureAccepted = false; closureResult = nil; status = "Mesurez le mur suivant." }
@@ -200,7 +198,14 @@ import ImageIO
         guard let line = WallGeometry.line(transform: representative.1, offset: Float(offsetCentimeters / 100)) else { finishFailure("Téléphone trop incliné : plaquez l’écran verticalement et réessayez."); return }
         let observation = WallObservation(timestamp: representative.0, cameraTransform: representative.1, trackingQuality: "normal", stabilityScore: maxDistance)
         cancel()
-        if checkingClosure, let firstWall = walls.first {
+        if checkingClosure {
+            checkFirstWall(line: line, observations: [observation])
+        } else {
+            acceptWallObservation(observation, line: line)
+        }
+    }
+    private func checkFirstWall(line: WallLine, observations: [WallObservation]) {
+        if let firstWall = walls.first {
             let result = WallGeometry.closure(firstWall.line, line)
             let geometry = WallGeometry.geometry(walls, closed: true, settings: settings)
             let points = geometry.corners
@@ -212,12 +217,15 @@ import ImageIO
             closureAccepted = good
             let wallGood = result.distance <= settings.goodClosureDistance && result.angle <= settings.goodClosureAngle
             closureResult = String(format: "Mur 1 : %@ · écart %.0f cm · orientation %.1f°. Contour : %@", wallGood ? "cohérent" : (uncertain ? "incertain" : "incohérent"), result.distance * 100, result.angle, geometry.error ?? (directionMatches ? "cohérent" : "sens différent de celui choisi"))
-            if good { walls[0].observations.append(observation) }
+            // Keep the control observations even when the closure is uncertain.
+            walls[0].observations.append(contentsOf: observations)
             status = good ? "Contrôle terminé. Les mesures restent approximatives." : "Vérifiez les murs et recommencez le contrôle."
             persist?()
             saveWorldMap()
             UINotificationFeedbackGenerator().notificationOccurred(good ? .success : .warning)
-        } else {
+        }
+    }
+    private func acceptWallObservation(_ observation: WallObservation, line: WallLine) {
             var estimatedLine = line
             var observations = [observation]
             if captureMode == .twoPoints {
@@ -239,12 +247,38 @@ import ImageIO
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
                 return
             }
-            walls.append(MeasuredWall(observations: observations, line: estimatedLine)); pendingObservation = nil; closureAccepted = false; closureResult = nil
+            submitWall(line: estimatedLine, observations: observations)
+    }
+    private func submitWall(line: WallLine, observations: [WallObservation]) {
+            if walls.count >= 3, let first = walls.first {
+                let comparison = WallGeometry.closure(first.line, line)
+                if comparison.distance <= settings.goodClosureDistance && comparison.angle <= settings.goodClosureAngle {
+                    firstWallCandidate = (line, observations); possibleFirstWall = true
+                    status = "Cette prise ressemble au mur 1 : choisissez comment l’utiliser."
+                    return
+                }
+            }
+            addWall(line: line, observations: observations)
+    }
+    private func addWall(line: WallLine, observations: [WallObservation]) {
+            walls.append(MeasuredWall(observations: observations, line: line)); pendingObservation = nil; closureAccepted = false; closureResult = nil
             status = "Mur \(walls.count) enregistré. Passez au mur suivant."
             persist?()
             saveWorldMap()
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-        }
+    }
+    func resolveFirstWallCandidate(useAsControl: Bool) {
+        guard let candidate = firstWallCandidate else { return }
+        firstWallCandidate = nil; possibleFirstWall = false
+        if useAsControl {
+            pendingObservation = nil; checkingClosure = true
+            checkFirstWall(line: candidate.0, observations: candidate.1)
+        } else { addWall(line: candidate.0, observations: candidate.1) }
+    }
+    var lastWallMayDuplicateFirst: Bool {
+        guard walls.count >= 4, let first = walls.first, let last = walls.last else { return false }
+        let comparison = WallGeometry.closure(first.line, last.line)
+        return comparison.distance <= settings.goodClosureDistance && comparison.angle <= settings.goodClosureAngle
     }
     private func finishFailure(_ text: String) { cancel(); status = text; UINotificationFeedbackGenerator().notificationOccurred(.error) }
     var geometry: SurveyGeometry { WallGeometry.geometry(walls, closed: closureAccepted, settings: settings) }
@@ -314,6 +348,7 @@ struct WallSurveyScreen: View {
     @State private var showing3D = false
     @State private var savedMessage = false
     @State private var confirmFinishWithoutMap = false
+    @State private var confirmRemoveDuplicate = false
     init(direction: SurveyDirection, mode: WallCaptureMode = .single, draft: WallSurveyDraft? = nil, resume: Bool = false) { _model = StateObject(wrappedValue: WallSurveyModel(direction: direction, mode: mode, draft: draft, resume: resume)) }
     private func saveDraft() {
         guard !model.walls.isEmpty || model.pendingObservation != nil || model.referenceImageData != nil || drafts.drafts.contains(where: { $0.id == model.draftID }) else { return }
@@ -358,7 +393,11 @@ struct WallSurveyScreen: View {
                         }.disabled((model.walls.isEmpty && model.pendingObservation == nil) || model.mapSaving) }
                     }
                     if !model.checkingClosure && !model.closureAccepted && model.walls.count >= 3 && model.pendingObservation == nil {
-                        Button("Contrôler la boucle (facultatif)") { model.prepareClosure() }
+                        Button("Fermer le contour : contrôler le mur 1") { model.prepareClosure() }
+                        Text("Ne rajoutez pas le mur 1 : mesurez-le une nouvelle fois avec ce bouton pour contrôler et fermer le contour.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if model.lastWallMayDuplicateFirst && model.pendingObservation == nil {
+                        Button("Vérifier le dernier mur : possible doublon du mur 1") { confirmRemoveDuplicate = true }.foregroundStyle(.orange)
                     }
                 }
                 if !model.readOnly {
@@ -408,6 +447,14 @@ struct WallSurveyScreen: View {
                 Button("Explorer encore", role: .cancel) { }
                 Button("Fermer quand même") { model.stop(); dismiss() }
             } message: { Text("Les murs sont sauvegardés, mais la reprise avec ARKit ne sera pas disponible sans carte. Bougez lentement dans la pièce puis actualisez la carte.") }
+            .alert("Cette mesure correspond-elle au mur 1 ?", isPresented: $model.possibleFirstWall) {
+                Button("Utiliser pour contrôler le mur 1") { model.resolveFirstWallCandidate(useAsControl: true) }
+                Button("Garder comme nouveau mur") { model.resolveFirstWallCandidate(useAsControl: false) }
+            } message: { Text("Les positions et orientations sont proches. Si vous êtes revenu sur le premier mur, utilisez cette prise comme contrôle : aucun mur supplémentaire ne sera créé.") }
+            .alert("Retirer le dernier mur ?", isPresented: $confirmRemoveDuplicate) {
+                Button("Retirer le dernier mur", role: .destructive) { model.undo() }
+                Button("Conserver", role: .cancel) { }
+            } message: { Text("Le dernier mur ressemble au mur 1. Retirez-le uniquement si vous l’avez enregistré une deuxième fois pour fermer le contour. Les autres murs seront conservés.") }
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Fermer") {
                 if !model.readOnly { saveDraft(); guard drafts.error == nil else { return } }
                 model.stop(); dismiss()

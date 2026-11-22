@@ -14,6 +14,7 @@ struct FloorPlanEditorView: View {
     @State private var initialPositions: [UUID: CGPoint] = [:]
     @State private var moveHistory: [PlanMove] = []
     @State private var confirmReset = false
+    @State private var openingWall: PlanElement?
     private func setEditing(_ enabled: Bool) {
         editing = enabled; adding = nil; moveHistory.removeAll()
         initialPositions = enabled ? Dictionary(uniqueKeysWithValues: store.plan.elements.map { ($0.id, CGPoint(x: CGFloat($0.x), y: CGFloat($0.z))) }) : [:]
@@ -47,7 +48,7 @@ struct FloorPlanEditorView: View {
                     Button { confirmReset = true } label: { Label("Réinitialiser", systemImage: "arrow.counterclockwise") }.disabled(moveHistory.isEmpty)
                 }
             }.font(.footnote).padding(.horizontal).padding(.vertical, 6)
-            if let id = selectedID, let index = store.plan.elements.firstIndex(where: { $0.id == id }) { ElementInspector(element: $store.plan.elements[index], editing: editing) { store.delete(id); selectedID = nil } onChange: { store.changed() } } else { VStack(spacing: 4) { PlanMeasurements(plan: store.plan); Text("Glisser : vue · pincer / tourner : vue · double toucher : cadrer · éditer + appui long : déplacer un élément").font(.caption2).foregroundStyle(.secondary) }.padding(10) }
+            if let id = selectedID, let index = store.plan.elements.firstIndex(where: { $0.id == id }) { ElementInspector(element: $store.plan.elements[index], editing: editing, onMeasureOpening: { openingWall = store.plan.elements[index] }) { store.delete(id); selectedID = nil } onChange: { store.changed() } } else { VStack(spacing: 4) { PlanMeasurements(plan: store.plan); Text("Glisser : vue · pincer / tourner : vue · double toucher : cadrer · éditer + appui long : déplacer un élément").font(.caption2).foregroundStyle(.secondary) }.padding(10) }
         }.navigationTitle(store.selectedPlanName()).toolbar {
             ToolbarItem(placement: .topBarLeading) { Button { showLibrary = true } label: { Image(systemName: "folder") } }
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -76,6 +77,12 @@ struct FloorPlanEditorView: View {
                 Button("Annuler", role: .cancel) { }
             } message: { Text("Les éléments existants retrouveront leur position au moment où vous avez activé Éditer. Les autres modifications ne seront pas annulées.") }
             .sheet(isPresented: $showContactCapture) { NavigationStack { WallSurveyStartView() } }
+            .sheet(item: $openingWall) { wall in
+                OpeningCaptureScreen(wall: wall) { opening in
+                    guard store.plan.elements.contains(where: { $0.id == wall.id && $0.kind == .wall }) else { return }
+                    store.plan.elements.append(opening); store.changed()
+                }
+            }
             .fullScreenCover(isPresented: $store.isScanning) { RoomScannerSheet() }
             .onChange(of: store.selectedPlanID) { _, _ in selectedID = nil; setEditing(false) } }
     }
@@ -118,8 +125,8 @@ private struct PlanViewControls: View {
 }
 
 private struct ElementInspector: View {
-    @Binding var element: PlanElement; var editing: Bool; var onDelete: () -> Void; var onChange: () -> Void
-    var body: some View { VStack(spacing: 8) { HStack { Text(element.title).font(.headline); Spacer(); Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }.disabled(!editing) }; Picker("Type", selection: $element.kind) { ForEach(PlanElementKind.allCases, id: \.rawValue) { Text($0.title).tag($0) } }.pickerStyle(.menu).disabled(!editing); HStack(spacing: 14) { Measure(label: "Largeur", value: element.width); Measure(label: "Profondeur", value: element.depth); Measure(label: "Hauteur", value: element.measuredHeight) }; HStack { Button { element.rotation -= .pi / 12; onChange() } label: { Label("Tourner", systemImage: "rotate.left") }; Spacer(); Button { element.rotation += .pi / 12; onChange() } label: { Image(systemName: "rotate.right") } }.font(.footnote).disabled(!editing) }.padding().background(.thinMaterial).onChange(of: element.kind) { _, _ in onChange() } }
+    @Binding var element: PlanElement; var editing: Bool; var onMeasureOpening: () -> Void; var onDelete: () -> Void; var onChange: () -> Void
+    var body: some View { VStack(spacing: 8) { HStack { Text(element.title).font(.headline); Spacer(); Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }.disabled(!editing) }; Picker("Type", selection: $element.kind) { ForEach(PlanElementKind.allCases, id: \.rawValue) { Text($0.title).tag($0) } }.pickerStyle(.menu).disabled(!editing); HStack(spacing: 14) { Measure(label: "Largeur", value: element.width); Measure(label: "Profondeur", value: element.depth); Measure(label: "Hauteur", value: element.measuredHeight) }; HStack { Button { element.rotation -= .pi / 12; onChange() } label: { Label("Tourner", systemImage: "rotate.left") }; Spacer(); Button { element.rotation += .pi / 12; onChange() } label: { Image(systemName: "rotate.right") } }.font(.footnote).disabled(!editing); if element.kind == .wall { Button("Mesurer une ouverture avec la caméra", action: onMeasureOpening).disabled(!editing) } }.padding().background(.thinMaterial).onChange(of: element.kind) { _, _ in onChange() } }
 }
 
 private struct Measure: View { let label: String; let value: Double; var body: some View { VStack(spacing: 2) { Text(label).font(.caption).foregroundStyle(.secondary); Text("\(value, specifier: "%.2f") m").font(.subheadline.weight(.semibold)).monospacedDigit() }.frame(maxWidth: .infinity) } }

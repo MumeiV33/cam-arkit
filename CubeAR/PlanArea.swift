@@ -16,13 +16,16 @@ enum PlanArea {
         var remaining = Array(segments.dropFirst())
         while !remaining.isEmpty {
             guard let current = points.last else { return nil }
-            let matches = remaining.enumerated().compactMap { index, segment -> (Int, SIMD2<Double>)? in
-                let startMatch = simd_distance(current, segment.0) <= tolerance
-                let endMatch = simd_distance(current, segment.1) <= tolerance
-                guard startMatch != endMatch else { return nil }
-                return (startMatch || endMatch) ? (index, startMatch ? segment.1 : segment.0) : nil
+            let matches = remaining.enumerated().compactMap { index, segment -> (Int, SIMD2<Double>, Double)? in
+                let startDistance = simd_distance(current, segment.0)
+                let endDistance = simd_distance(current, segment.1)
+                let nearest = min(startDistance, endDistance)
+                guard nearest <= tolerance, abs(startDistance - endDistance) > 1e-8 else { return nil }
+                return (index, startDistance < endDistance ? segment.1 : segment.0, nearest)
             }
-            guard matches.count == 1, let match = matches.first else { return nil }
+            let ordered = matches.sorted { $0.2 < $1.2 }
+            guard let match = ordered.first else { return nil }
+            if ordered.count > 1 && abs(ordered[1].2 - match.2) < 1e-6 { return nil }
             points.append(match.1); remaining.remove(at: match.0)
         }
         guard let end = points.last, simd_distance(end, points[0]) <= tolerance else { return nil }

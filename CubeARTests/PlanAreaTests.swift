@@ -16,4 +16,9 @@ final class PlanAreaTests: XCTestCase {
         let crossed = [wall(1, 1, diagonal, .pi / 4), wall(1, 2, 2, 0), wall(1, 1, diagonal, -.pi / 4), wall(1, 0, 2, 0)]
         XCTAssertNil(PlanArea.area(walls: crossed))
     }
+    func testClosedContourWithShortWallWithinTolerance() throws {
+        let walls = [wall(2, 0, 4, 0), wall(4, 1.5, 3, .pi / 2), wall(2, 3, 4, 0),
+                     wall(0, 1.515, 2.97, .pi / 2), wall(0, 0.015, 0.03, .pi / 2)]
+        XCTAssertEqual(try XCTUnwrap(PlanArea.area(walls: walls)), 12, accuracy: 0.001)
+    }
 }
