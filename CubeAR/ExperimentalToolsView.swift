@@ -3,6 +3,7 @@ import AVFoundation
 import Vision
 import CoreML
 import UniformTypeIdentifiers
+import CoreImage
 
 struct ExperimentalToolsView: View {
     @Environment(\.dismiss) private var dismiss
@@ -31,6 +32,11 @@ struct ExperimentalToolsView: View {
 @MainActor private final class DetectionState: ObservableObject {
     @Published var status = "Démarrage de la caméra…"
     @Published var modelName: String?
+    @Published var selectingArea = false
+    @Published var hasArea = false
+    @Published var monochrome = false
+    @Published var contrast = false
+    @Published var brighter = false
     weak var controller: DetectionCameraController?
 }
 
@@ -44,10 +50,32 @@ private struct ObjectDetectionExperiment: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
             Text(state.status).font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
+            HStack {
+                Toggle("N&B", isOn: $state.monochrome)
+                Toggle("Contraste", isOn: $state.contrast)
+                Toggle("Éclaircir", isOn: $state.brighter)
+            }.toggleStyle(.button).font(.caption)
+            Text("Filtres cumulables : l’image affichée est aussi celle analysée.")
+                .font(.caption2).foregroundStyle(.secondary)
             Text(state.modelName == nil
                  ? "Sans modèle : Vision décrit l’image, sans localiser les objets."
                  : "Modèle : \(state.modelName ?? "") · résultats expérimentaux, sans mesure.")
                 .font(.caption).foregroundStyle(.secondary)
+            if state.modelName == nil {
+                HStack {
+                    Button {
+                        state.selectingArea.toggle()
+                        state.controller?.setSelectingArea(state.selectingArea)
+                    } label: {
+                        Label(state.selectingArea ? "Annuler le tracé" : "Choisir une zone", systemImage: "crop")
+                    }.buttonStyle(.bordered)
+                    if state.hasArea {
+                        Button("Image entière") { state.controller?.clearArea() }.buttonStyle(.bordered)
+                    }
+                }
+                Text(state.selectingArea ? "Tracez un rectangle sur l’image avec le doigt." : (state.hasArea ? "Seule la zone bleue est analysée. Elle reste fixe à l’écran." : "Choisissez une zone pour analyser seulement une partie de l’image."))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Button { importing = true } label: { Label("Importer un modèle Core ML", systemImage: "square.and.arrow.down") }
                 .buttonStyle(.bordered)
             Text("Fichier .mlmodel de détection compatible Vision. Pour les portes et fenêtres, il doit avoir été entraîné à les reconnaître.")
@@ -70,7 +98,9 @@ private struct DetectionCamera: UIViewControllerRepresentable {
         controller.state = state; state.controller = controller
         return controller
     }
-    func updateUIViewController(_ controller: DetectionCameraController, context: Context) { }
+    func updateUIViewController(_ controller: DetectionCameraController, context: Context) {
+        controller.setFilters(monochrome: state.monochrome, contrast: state.contrast, brighter: state.brighter)
+    }
     static func dismantleUIViewController(_ controller: DetectionCameraController, coordinator: ()) { controller.stop() }
 }
 
@@ -79,9 +109,26 @@ private final class DetectionCameraController: UIViewController, AVCaptureVideoD
     private let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "experiment.object-camera")
     private let overlay = CAShapeLayer()
+    private let areaLayer = CAShapeLayer()
+    private let filteredLayer = CALayer()
+    private let imageContext = CIContext()
     private var preview: AVCaptureVideoPreviewLayer?
     private var model: VNCoreMLModel?
     private var lastFrame = Date.distantPast
+    private var selectionStart = CGPoint.zero
+    private var selectionRect: CGRect?
+    // Accessed only on the camera queue; changes arrive from the main queue.
+    private var analysisRegion = CGRect(x: 0, y: 0, width: 1, height: 1)
+    private var areaGesture: UIPanGestureRecognizer?
+    private var requestedFilters = FilterOptions()
+    private var activeFilters = FilterOptions() // camera queue only
+
+    private struct FilterOptions: Equatable {
+        var monochrome = false
+        var contrast = false
+        var brighter = false
+        var enabled: Bool { monochrome || contrast || brighter }
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -89,9 +136,18 @@ private final class DetectionCameraController: UIViewController, AVCaptureVideoD
         let preview = AVCaptureVideoPreviewLayer(session: session)
         preview.videoGravity = .resizeAspectFill
         view.layer.addSublayer(preview); self.preview = preview
+        filteredLayer.contentsGravity = .resizeAspectFill
+        filteredLayer.isHidden = true
+        view.layer.addSublayer(filteredLayer)
         overlay.strokeColor = UIColor.systemYellow.cgColor
         overlay.fillColor = UIColor.clear.cgColor; overlay.lineWidth = 3
         view.layer.addSublayer(overlay)
+        areaLayer.strokeColor = UIColor.systemBlue.cgColor
+        areaLayer.fillColor = UIColor.systemBlue.withAlphaComponent(0.08).cgColor
+        areaLayer.lineWidth = 3; areaLayer.lineDashPattern = [6, 4]
+        view.layer.addSublayer(areaLayer)
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(selectArea(_:)))
+        pan.isEnabled = false; view.addGestureRecognizer(pan); areaGesture = pan
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized: start()
         case .notDetermined:
@@ -102,7 +158,42 @@ private final class DetectionCameraController: UIViewController, AVCaptureVideoD
         }
     }
     override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews(); preview?.frame = view.bounds; overlay.frame = view.bounds
+        super.viewDidLayoutSubviews(); preview?.frame = view.bounds; filteredLayer.frame = view.bounds; overlay.frame = view.bounds; areaLayer.frame = view.bounds
+    }
+    func setFilters(monochrome: Bool, contrast: Bool, brighter: Bool) {
+        let options = FilterOptions(monochrome: monochrome, contrast: contrast, brighter: brighter)
+        guard options != requestedFilters else { return }
+        requestedFilters = options
+        if !options.enabled { filteredLayer.isHidden = true; filteredLayer.contents = nil }
+        queue.async { [weak self] in self?.activeFilters = options }
+    }
+    func setSelectingArea(_ enabled: Bool) { areaGesture?.isEnabled = enabled }
+    func clearArea() {
+        selectionRect = nil; areaLayer.path = nil; state?.hasArea = false
+        queue.async { [weak self] in self?.analysisRegion = CGRect(x: 0, y: 0, width: 1, height: 1) }
+    }
+    @objc private func selectArea(_ gesture: UIPanGestureRecognizer) {
+        let point = gesture.location(in: view)
+        if gesture.state == .began { selectionStart = point }
+        if gesture.state == .changed || gesture.state == .ended {
+            let rectangle = CGRect(x: min(selectionStart.x, point.x), y: min(selectionStart.y, point.y),
+                                   width: abs(point.x - selectionStart.x), height: abs(point.y - selectionStart.y)).intersection(view.bounds)
+            if !rectangle.isNull { areaLayer.path = UIBezierPath(rect: rectangle).cgPath }
+            guard gesture.state == .ended else { return }
+            guard !rectangle.isNull, rectangle.width >= 30, rectangle.height >= 30, let preview else {
+                areaLayer.path = selectionRect.map { UIBezierPath(rect: $0).cgPath }
+                state?.status = "Zone trop petite : tracez un rectangle plus grand."
+                return
+            }
+            let metadata = preview.metadataOutputRectConverted(fromLayerRect: rectangle).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            guard !metadata.isNull, metadata.width > 0, metadata.height > 0 else { clearArea(); return }
+            let region = CGRect(x: metadata.minX, y: 1 - metadata.maxY, width: metadata.width, height: metadata.height)
+            selectionRect = rectangle; state?.hasArea = true; state?.selectingArea = false; areaGesture?.isEnabled = false
+            queue.async { [weak self] in self?.analysisRegion = region }
+        }
+        if gesture.state == .cancelled || gesture.state == .failed {
+            areaLayer.path = selectionRect.map { UIBezierPath(rect: $0).cgPath }
+        }
     }
     private func message(_ text: String) { DispatchQueue.main.async { [weak self] in self?.state?.status = text } }
     private func start() {
@@ -132,6 +223,7 @@ private final class DetectionCameraController: UIViewController, AVCaptureVideoD
                 let model = try VNCoreMLModel(for: MLModel(contentsOf: compiled))
                 self?.model = model
                 DispatchQueue.main.async { [weak self] in
+                    self?.clearArea(); self?.setSelectingArea(false); self?.state?.selectingArea = false
                     self?.state?.modelName = url.lastPathComponent
                     self?.state?.status = "Modèle chargé. Dirigez la caméra vers un objet."
                 }
@@ -139,16 +231,40 @@ private final class DetectionCameraController: UIViewController, AVCaptureVideoD
         }
     }
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard Date().timeIntervalSince(lastFrame) >= 0.6, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let options = activeFilters
+        var filteredImage: CGImage?
+        if options.enabled {
+            let image = CIImage(cvPixelBuffer: buffer)
+            guard let filter = CIFilter(name: "CIColorControls") else { message("Filtres indisponibles."); return }
+            filter.setValue(image, forKey: kCIInputImageKey)
+            filter.setValue(options.monochrome ? 0.0 : 1.0, forKey: kCIInputSaturationKey)
+            filter.setValue(options.contrast ? 1.4 : 1.0, forKey: kCIInputContrastKey)
+            filter.setValue(options.brighter ? 0.12 : 0.0, forKey: kCIInputBrightnessKey)
+            guard let result = filter.outputImage,
+                  let rendered = imageContext.createCGImage(result, from: result.extent) else { message("Impossible d’appliquer les filtres."); return }
+            filteredImage = rendered
+            let upright = CIImage(cgImage: rendered).oriented(.right)
+            if let displayImage = imageContext.createCGImage(upright, from: upright.extent) {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.requestedFilters == options else { return }
+                    self.filteredLayer.contents = displayImage; self.filteredLayer.isHidden = false
+                }
+            }
+        }
+        guard Date().timeIntervalSince(lastFrame) >= 0.6 else { return }
         lastFrame = Date()
         let request: VNImageBasedRequest
         if let model {
             let coreRequest = VNCoreMLRequest(model: model)
             coreRequest.imageCropAndScaleOption = .scaleFill
             request = coreRequest
-        } else { request = VNClassifyImageRequest() }
+        } else { request = VNClassifyImageRequest(); request.regionOfInterest = analysisRegion }
         do {
-            try VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .right, options: [:]).perform([request])
+            let handler: VNImageRequestHandler
+            if let filteredImage { handler = VNImageRequestHandler(cgImage: filteredImage, orientation: .right, options: [:]) }
+            else { handler = VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .right, options: [:]) }
+            try handler.perform([request])
             if let objects = request.results as? [VNRecognizedObjectObservation] {
                 let found = objects.filter { $0.confidence >= 0.4 }
                 let text = found.prefix(4).compactMap { $0.labels.first }.map { "\($0.identifier) \(Int($0.confidence * 100)) %" }.joined(separator: " · ")
