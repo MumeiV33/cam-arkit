@@ -11,7 +11,7 @@
     <key>CFBundleShortVersionString</key><string>1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSRequiresIPhoneOS</key><true/>
-    <key>NSCameraUsageDescription</key><string>La caméra sert à détecter les surfaces et y placer vos cubes en réalité augmentée.</string>
+    <key>NSCameraUsageDescription</key><string>La caméra sert à relever les pièces et à essayer les outils de reconnaissance.</string>
     <key>UIApplicationSceneManifest</key>
     <dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
     <key>UILaunchScreen</key><dict/>

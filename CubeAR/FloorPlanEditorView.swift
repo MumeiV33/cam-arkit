@@ -6,35 +6,37 @@ struct FloorPlanEditorView: View {
     @State private var adding: PlanElementKind?
     @State private var showLibrary = false
     @State private var show3D = false
+    @State private var showTools = false
     @State private var showCaptureChoice = false
     @State private var showContactCapture = false
     @State private var confirmLidarReplacement = false
     @State private var overlays = PlanOverlayOptions()
     @State private var editing = false
-    @State private var initialPositions: [UUID: CGPoint] = [:]
-    @State private var moveHistory: [PlanMove] = []
+    @State private var initialElements: [PlanElement] = []
+    @State private var editHistory: [[PlanElement]] = []
     @State private var confirmReset = false
     @State private var openingWall: PlanElement?
     private func setEditing(_ enabled: Bool) {
-        editing = enabled; adding = nil; moveHistory.removeAll()
-        initialPositions = enabled ? Dictionary(uniqueKeysWithValues: store.plan.elements.map { ($0.id, CGPoint(x: CGFloat($0.x), y: CGFloat($0.z))) }) : [:]
+        editing = enabled; adding = nil; editHistory.removeAll()
+        initialElements = enabled ? store.plan.elements : []
     }
     private func move(_ id: UUID, by delta: CGPoint) {
         guard editing, let index = store.plan.elements.firstIndex(where: { $0.id == id }), delta != .zero else { return }
-        let element = store.plan.elements[index]
-        moveHistory.append(PlanMove(id: id, position: CGPoint(x: CGFloat(element.x), y: CGFloat(element.z))))
+        editHistory.append(store.plan.elements)
         store.plan.elements[index].x += Double(delta.x); store.plan.elements[index].z += Double(delta.y); store.changed()
     }
-    private func undoMove() {
-        guard let previous = moveHistory.popLast(), let index = store.plan.elements.firstIndex(where: { $0.id == previous.id }) else { return }
-        store.plan.elements[index].x = Double(previous.position.x); store.plan.elements[index].z = Double(previous.position.y); store.changed()
+    private func undoEdit() {
+        guard let previous = editHistory.popLast() else { return }
+        store.plan.elements = previous; selectedID = nil; store.changed()
     }
-    private func resetMoves() {
-        for index in store.plan.elements.indices {
-            guard let position = initialPositions[store.plan.elements[index].id] else { continue }
-            store.plan.elements[index].x = Double(position.x); store.plan.elements[index].z = Double(position.y)
-        }
-        moveHistory.removeAll(); store.changed()
+    private func resetEdits() {
+        store.plan.elements = initialElements
+        editHistory.removeAll(); selectedID = nil; store.changed()
+    }
+    private func deleteElement(_ id: UUID) {
+        guard editing, store.plan.elements.contains(where: { $0.id == id }) else { return }
+        editHistory.append(store.plan.elements)
+        store.delete(id); selectedID = nil
     }
     var body: some View {
         NavigationStack { VStack(spacing: 0) {
@@ -44,14 +46,15 @@ struct FloorPlanEditorView: View {
             HStack {
                 Toggle("Éditer", isOn: Binding(get: { editing }, set: { setEditing($0) })).toggleStyle(.switch)
                 if editing {
-                    Button { undoMove() } label: { Label("Annuler", systemImage: "arrow.uturn.backward") }.disabled(moveHistory.isEmpty)
-                    Button { confirmReset = true } label: { Label("Réinitialiser", systemImage: "arrow.counterclockwise") }.disabled(moveHistory.isEmpty)
+                    Button { undoEdit() } label: { Label("Annuler", systemImage: "arrow.uturn.backward") }.disabled(editHistory.isEmpty)
+                    Button { confirmReset = true } label: { Label("Réinitialiser", systemImage: "arrow.counterclockwise") }.disabled(store.plan.elements == initialElements)
                 }
             }.font(.footnote).padding(.horizontal).padding(.vertical, 6)
-            if let id = selectedID, let index = store.plan.elements.firstIndex(where: { $0.id == id }) { ElementInspector(element: $store.plan.elements[index], editing: editing, onMeasureOpening: { openingWall = store.plan.elements[index] }) { store.delete(id); selectedID = nil } onChange: { store.changed() } } else { VStack(spacing: 4) { PlanMeasurements(plan: store.plan); Text("Glisser : vue · pincer / tourner : vue · double toucher : cadrer · éditer + appui long : déplacer un élément").font(.caption2).foregroundStyle(.secondary) }.padding(10) }
+            if let id = selectedID, let index = store.plan.elements.firstIndex(where: { $0.id == id }) { ElementInspector(element: $store.plan.elements[index], editing: editing, onMeasureOpening: { openingWall = store.plan.elements[index] }) { deleteElement(id) } onChange: { store.changed() } } else { VStack(spacing: 4) { PlanMeasurements(plan: store.plan); Text("Glisser : vue · pincer / tourner : vue · double toucher : cadrer · éditer + appui long : déplacer un élément").font(.caption2).foregroundStyle(.secondary) }.padding(10) }
         }.navigationTitle(store.selectedPlanName()).toolbar {
             ToolbarItem(placement: .topBarLeading) { Button { showLibrary = true } label: { Image(systemName: "folder") } }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { showTools = true } label: { Image(systemName: "wrench.and.screwdriver") }
                 Menu { ForEach(PlanElementKind.allCases, id: \.rawValue) { kind in Button(kind.title) { adding = kind; selectedID = nil } } } label: { Image(systemName: "plus") }.disabled(!editing)
                 Menu {
                     Toggle("Numéros des murs", isOn: $overlays.wallNumbers)
@@ -63,6 +66,7 @@ struct FloorPlanEditorView: View {
                 Button { showCaptureChoice = true } label: { Image(systemName: "viewfinder") }
             }
         }.sheet(isPresented: $showLibrary) { PlanLibraryView() }.sheet(isPresented: $show3D) { Plan3DView(plan: store.plan) }
+            .sheet(isPresented: $showTools) { ExperimentalToolsView() }
             .confirmationDialog("Mesurer une pièce", isPresented: $showCaptureChoice, titleVisibility: .visible) {
                 Button("Avec LiDAR") { confirmLidarReplacement = true }
                 Button("Sans LiDAR — contact") { showContactCapture = true }
@@ -72,10 +76,10 @@ struct FloorPlanEditorView: View {
                 Button("Continuer", role: .destructive) { store.startScan() }
                 Button("Annuler", role: .cancel) { }
             } message: { Text("Le nouveau scan LiDAR remplacera le plan sélectionné. Pour conserver l’ancien, créez d’abord un nouveau plan dans le dossier.") }
-            .alert("Réinitialiser les déplacements ?", isPresented: $confirmReset) {
-                Button("Réinitialiser", role: .destructive) { resetMoves() }
+            .alert("Réinitialiser les modifications ?", isPresented: $confirmReset) {
+                Button("Réinitialiser", role: .destructive) { resetEdits() }
                 Button("Annuler", role: .cancel) { }
-            } message: { Text("Les éléments existants retrouveront leur position au moment où vous avez activé Éditer. Les autres modifications ne seront pas annulées.") }
+            } message: { Text("Le plan retrouvera son état au moment où vous avez activé Éditer, y compris les éléments supprimés. Toutes les modifications faites depuis seront perdues.") }
             .sheet(isPresented: $showContactCapture) { NavigationStack { WallSurveyStartView() } }
             .sheet(item: $openingWall) { wall in
                 OpeningCaptureScreen(wall: wall) { opening in
@@ -88,7 +92,6 @@ struct FloorPlanEditorView: View {
     }
 }
 
-private struct PlanMove { let id: UUID; let position: CGPoint }
 
 private struct PlanCanvas: View {
     @Binding var elements: [PlanElement]; @Binding var selectedID: UUID?; @Binding var adding: PlanElementKind?; let viewScale: CGFloat; let viewRotation: Double; var onChange: () -> Void
