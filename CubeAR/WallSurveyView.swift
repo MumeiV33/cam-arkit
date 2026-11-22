@@ -92,6 +92,7 @@ import SceneKit
 }
 
 struct WallSurveyStartView: View {
+    @Environment(\.dismiss) private var dismiss
     @State private var direction: SurveyDirection = .clockwise
     @State private var showSurvey = false
     var body: some View {
@@ -104,6 +105,7 @@ struct WallSurveyStartView: View {
             }
             Section("Précision") { Text("Prototype expérimental : l’écran peut ne pas être parfaitement plaqué. La dérive ARKit et la coque influencent les mesures ; vérifiez au mètre.") }
         }.navigationTitle("Relevé par contact")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Fermer") { dismiss() } } }
             .fullScreenCover(isPresented: $showSurvey) { WallSurveyScreen(direction: direction) }
     }
 }
@@ -158,7 +160,7 @@ struct WallSurveyScreen: View {
                             savedMessage = true
                         }.buttonStyle(.borderedProminent)
                     }
-                    if savedMessage { Text("Plan enregistré dans le lieu sélectionné. Retrouvez-le dans LiDAR / Plans.").font(.footnote).foregroundStyle(.green) }
+                    if savedMessage { Text("Plan enregistré dans le lieu sélectionné. Fermez le relevé pour le consulter.").font(.footnote).foregroundStyle(.green) }
                 }
                 Stepper("Décalage caméra-écran estimé : \(model.offsetCentimeters, specifier: "%.1f") cm", value: $model.offsetCentimeters, in: 0...3, step: 0.1).disabled(!model.walls.isEmpty || model.capturing)
                 Text("Valeur indicative, coque comprise ; elle n’est pas calibrée automatiquement. Les hauteurs et angles inclinés ne sont pas mesurés.").font(.caption).foregroundStyle(.secondary)

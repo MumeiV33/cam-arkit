@@ -47,6 +47,8 @@ Un avertissement Windows concernant `Bonjour/mdnsNSP.dll` peut apparaître aprè
 
 Le workflow utilise un runner macOS pour générer une IPA non signée. AltServer la signe ensuite temporairement pour le téléphone avec le compte Apple gratuit.
 
+Le build démarre sur les pushs, y compris ceux d’une branche ayant une pull request ouverte. Il n’est pas relancé une seconde fois par l’événement de pull request ; un nouveau push sur la même branche annule son build précédent encore en cours. Le build teste donc le commit de la branche, pas le résultat d’une fusion simulée avec `main`.
+
 ## 5. Installer ou mettre à jour CubeAR
 
 1. Garder AltServer ouvert et l’iPhone connecté en USB ou en Wi‑Fi.
@@ -75,9 +77,11 @@ Les miroirs, grandes vitres, pièces sombres et couloirs étroits peuvent produi
 
 ## Essais sans LiDAR
 
-L’onglet **Sans LiDAR** propose trois prototypes séparés : affichage des contours en direct, placement manuel de repères AR, puis création d’un contour de pièce en plaçant au moins trois coins au sol dans l’ordre. La création remplace le plan sélectionné après confirmation ; créez un nouveau plan au préalable pour conserver l’ancien. Les repères sont temporaires et les mesures restent approximatives. Ces prototypes ne détectent pas encore automatiquement les murs, portes ou fenêtres : vérifiez le résultat au mètre.
+Depuis le plan, le bouton scanner propose deux méthodes : **Avec LiDAR** (RoomPlan) et **Sans LiDAR — contact**. Le scan LiDAR remplace le plan sélectionné après confirmation : créez d’abord un nouveau plan dans le dossier pour conserver l’ancien. Les anciens écrans expérimentaux ne sont plus accessibles, mais leur code est conservé pour ne pas perdre leurs fonctionnalités pendant la transition.
 
-Le quatrième prototype, **Relevé par contact**, mesure les murs dans l’ordre sans LiDAR. Choisir le sens de parcours vu du dessus, puis démarrer chaque capture avant de poser l’écran contre une partie accessible du mur. Après un délai minimal de 3 s, une fenêtre stable d’environ 1 s avec suivi ARKit normal déclenche une vibration ; après 10 s, une capture insuffisante échoue. À la fin, revenir au premier mur pour contrôler la boucle : cette dernière observation ne crée pas de mur supplémentaire. Si le contrôle est cohérent, une vue 3D et l’enregistrement d’un nouveau plan dans le lieu sélectionné sont disponibles. La hauteur des murs est renseignée manuellement et n’est pas mesurée par le relevé.
+Le **Relevé par contact** mesure les murs dans l’ordre sans LiDAR. Choisir le sens de parcours vu du dessus, puis démarrer chaque capture avant de poser l’écran contre une partie accessible du mur. Après un délai minimal de 3 s, une fenêtre stable d’environ 1 s avec suivi ARKit normal déclenche une vibration ; après 10 s, une capture insuffisante échoue. À la fin, revenir au premier mur pour contrôler la boucle : cette dernière observation ne crée pas de mur supplémentaire. Si le contrôle est cohérent, une vue 3D et l’enregistrement d’un nouveau plan dans le lieu sélectionné sont disponibles. La hauteur des murs est renseignée manuellement et n’est pas mesurée par le relevé.
+
+Cette unification est une étape intermédiaire : les plans existants sont conservés. Le nouveau modèle de logement et d’ouvertures est préparé mais pas encore relié à l’interface ni à la sauvegarde. Les pièces ne sont donc pas encore rattachables entre elles par une porte ; aucune transformation entre sessions AR n’est supposée.
 
 Les paramètres expérimentaux sont dans `SurveySettings` : mouvement maximal 1,5 cm, rotation maximale environ 2°, intersections écartées si quasi parallèles ou à plus de 10 m, fermeture dite cohérente sous 10 cm et 5°. Le décalage caméra-écran est réglable avant le premier mur (1 cm par défaut, sans calibration certifiée). Ces seuils et la direction physique du décalage doivent être vérifiés sur appareil avec et sans coque : un suivi stable ou une boucle cohérente ne garantit pas une mesure exacte.
 

@@ -6,6 +6,9 @@ struct FloorPlanEditorView: View {
     @State private var adding: PlanElementKind?
     @State private var showLibrary = false
     @State private var show3D = false
+    @State private var showCaptureChoice = false
+    @State private var showContactCapture = false
+    @State private var confirmLidarReplacement = false
     @State private var viewScale: CGFloat = 1
     @State private var viewRotation = 0.0
     var body: some View {
@@ -20,9 +23,20 @@ struct FloorPlanEditorView: View {
                 Menu { ForEach(PlanElementKind.allCases, id: \.rawValue) { kind in Button(kind.title) { adding = kind; selectedID = nil } } } label: { Image(systemName: "plus") }
                 Menu { Button("Zoomer") { viewScale = min(3, viewScale + 0.25) }; Button("Dézoomer") { viewScale = max(0.5, viewScale - 0.25) }; Button("Tourner à gauche") { viewRotation -= 15 }; Button("Tourner à droite") { viewRotation += 15 }; Button("Réinitialiser") { viewScale = 1; viewRotation = 0 } } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
                 Button { show3D = true } label: { Image(systemName: "cube") }
-                Button { store.startScan() } label: { Image(systemName: "viewfinder") }
+                Button { showCaptureChoice = true } label: { Image(systemName: "viewfinder") }
             }
-        }.sheet(isPresented: $showLibrary) { PlanLibraryView() }.sheet(isPresented: $show3D) { Plan3DView(plan: store.plan) }.fullScreenCover(isPresented: $store.isScanning) { RoomScannerSheet() } }
+        }.sheet(isPresented: $showLibrary) { PlanLibraryView() }.sheet(isPresented: $show3D) { Plan3DView(plan: store.plan) }
+            .confirmationDialog("Mesurer une pièce", isPresented: $showCaptureChoice, titleVisibility: .visible) {
+                Button("Avec LiDAR") { confirmLidarReplacement = true }
+                Button("Sans LiDAR — contact") { showContactCapture = true }
+                Button("Annuler", role: .cancel) { }
+            } message: { Text("Avec LiDAR, le scan remplace le plan actuel. Sans LiDAR, le relevé validé peut être enregistré dans un nouveau plan.") }
+            .alert("Remplacer le plan actuel ?", isPresented: $confirmLidarReplacement) {
+                Button("Continuer", role: .destructive) { store.startScan() }
+                Button("Annuler", role: .cancel) { }
+            } message: { Text("Le nouveau scan LiDAR remplacera le plan sélectionné. Pour conserver l’ancien, créez d’abord un nouveau plan dans le dossier.") }
+            .sheet(isPresented: $showContactCapture) { NavigationStack { WallSurveyStartView() } }
+            .fullScreenCover(isPresented: $store.isScanning) { RoomScannerSheet() } }
     }
 }
 
